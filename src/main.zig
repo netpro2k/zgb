@@ -13,7 +13,9 @@ pub fn main() !void {
     var mem: Mem = undefined;
 
     const rom = try file.readToEndAlloc(allocator, 1024 * 32);
-    std.mem.copy(u8, &mem.data, rom);
+    std.mem.copy(u8, &mem.rom, rom);
+
+    mem.lcd.LY = 0x94; // TODO tetris waits on this, hardcode for now to get through to more interesting stuff
 
     std.debug.print("Read {d} bytes\n", .{rom.len});
 
@@ -25,6 +27,7 @@ pub fn main() !void {
         cpu.tick(&mem);
         if (true and (cpu.PC == 0x282C)) {
             _ = try stdin.readUntilDelimiterOrEof(&buffer, '\n');
+            // mem.lcd.LY = 0x91; // TODO tetris waits on this, hardcode for now to get through to more interesting stuff
         }
     }
 }
