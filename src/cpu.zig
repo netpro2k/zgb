@@ -50,6 +50,10 @@ const Op = enum(u8) {
 
     ld_bc_iw = 0x01,
 
+    ld_de_iw = 0x11,
+    ld_de_a = 0x12,
+    inc_de = 0x13,
+
     ld_hl_iw = 0x21,
 
     dec_b = 0x05,
@@ -69,7 +73,9 @@ const Op = enum(u8) {
     ld_c__a = 0x4F,
     ld_e__a = 0x5F,
 
-    ld_a__hl = 0x2A,
+    ldi_a__hl = 0x2A,
+    ldi_hl_a = 0x22,
+
     ld_e__hl = 0x5E,
     ld_d__hl = 0x56,
     ld_hl_a = 0x32,
@@ -125,7 +131,7 @@ const CbOp = enum(u8) {
 
 pub fn read_ib(self: *CPU, mem: *Mem) u8 {
     const ib = mem.read(self.PC);
-    std.debug.print("${X:0<2} ", .{ib});
+    std.debug.print("${X:0>2} ", .{ib});
     self.PC += 1;
     return ib;
 }
@@ -135,7 +141,7 @@ pub fn read_iw(self: *CPU, mem: *Mem) u16 {
     const high: u16 = mem.read(self.PC + 1);
     const iw = low | high << 8;
 
-    std.debug.print("${X:0<4} ", .{iw});
+    std.debug.print("${X:0>4} ", .{iw});
     self.PC += 2;
 
     return iw;
@@ -225,6 +231,9 @@ pub fn tick(self: *CPU, mem: *Mem) void {
             self.BC.r16 = self.read_iw(mem);
         },
 
+        .ld_de_iw => {
+            self.DE.r16 = self.read_iw(mem);
+        },
         .ld_hl_iw => {
             self.HL.r16 = self.read_iw(mem);
         },
@@ -246,6 +255,9 @@ pub fn tick(self: *CPU, mem: *Mem) void {
         .inc_hl => {
             self.HL.r16 = self.add_with_carry_w(self.HL.r16, 1);
         },
+        .inc_de => {
+            self.DE.r16 = self.add_with_carry_w(self.DE.r16, 1);
+        },
 
         .add_a => {
             self.AF.r8.A = self.add_with_carry(self.AF.r8.A, self.AF.r8.A);
@@ -259,9 +271,16 @@ pub fn tick(self: *CPU, mem: *Mem) void {
             self.DE.r8.E = self.sub_with_carry(self.DE.r8.E, 1);
         },
 
+        .ld_de_a => {
+            mem.write(self.DE.r16, self.AF.r8.A);
+        },
         .ld_hl_a => {
             mem.write(self.HL.r16, self.AF.r8.A);
             self.HL.r16 -= 1;
+        },
+        .ldi_hl_a => {
+            mem.write(self.HL.r16, self.AF.r8.A);
+            self.HL.r16 += 1;
         },
 
         .ld_hl_ib => {
@@ -277,8 +296,9 @@ pub fn tick(self: *CPU, mem: *Mem) void {
         .ld_mc_a => {
             mem.write_ff(self.BC.r8.C, self.AF.r8.A);
         },
-        .ld_a__hl => {
+        .ldi_a__hl => {
             self.AF.r8.A = mem.read(self.HL.r16);
+            self.HL.r16 += 1;
         },
         .ld_e__hl => {
             self.DE.r8.E = mem.read(self.HL.r16);
@@ -321,9 +341,17 @@ pub fn tick(self: *CPU, mem: *Mem) void {
 
         .xor_a_a => {
             self.AF.r8.A ^= self.AF.r8.A;
+            self.AF.flags.Z = self.AF.r8.A == 0;
+            self.AF.flags.N = false;
+            self.AF.flags.H = 0;
+            self.AF.flags.C = 0;
         },
         .xor_a_c => {
             self.AF.r8.A ^= self.BC.r8.C;
+            self.AF.flags.Z = self.AF.r8.A == 0;
+            self.AF.flags.N = false;
+            self.AF.flags.H = 0;
+            self.AF.flags.C = 0;
         },
 
         .and_ib => {
@@ -356,8 +384,20 @@ pub fn tick(self: *CPU, mem: *Mem) void {
             self.push_w(mem, self.DE.r16);
         },
 
-        .or_a_b => self.AF.r8.A |= self.BC.r8.B,
-        .or_a_c => self.AF.r8.A |= self.BC.r8.C,
+        .or_a_b => {
+            self.AF.r8.A |= self.BC.r8.B;
+            self.AF.flags.Z = self.AF.r8.A == 0;
+            self.AF.flags.N = false;
+            self.AF.flags.H = 0;
+            self.AF.flags.C = 0;
+        },
+        .or_a_c => {
+            self.AF.r8.A |= self.BC.r8.C;
+            self.AF.flags.Z = self.AF.r8.A == 0;
+            self.AF.flags.N = false;
+            self.AF.flags.H = 0;
+            self.AF.flags.C = 0;
+        },
 
         .di => {
             self.IME = false;

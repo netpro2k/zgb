@@ -146,7 +146,7 @@ pub fn read(self: Mem, addr: u16) u8 {
             return @bitCast(self.IE);
         },
         else => {
-            std.debug.panic("Unimplemented memory read {X:0<4}", .{addr});
+            std.debug.panic("Unimplemented memory read {X:0>4}", .{addr});
         },
     }
 }
@@ -164,6 +164,7 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
             self.work_ram[addr - 0xC000] = value;
         },
         0x8000...0x9FFF => { // VRAM
+            // std.debug.print("Write VRAM {X:0>4} = {X}", .{ addr, value });
             self.vram[addr - 0x8000] = value;
         },
 
@@ -205,7 +206,7 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         },
 
         else => {
-            std.debug.panic("Unimplemented memory write {X:0<4}", .{addr});
+            std.debug.panic("Unimplemented memory write {X:0>4}", .{addr});
         },
     }
 }
