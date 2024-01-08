@@ -33,6 +33,8 @@ PC: u16,
 
 IME: bool,
 
+halted: bool,
+
 pub fn init() CPU {
     return CPU{
         .AF = .{ .r8 = .{ .A = 0x01, .F = 0x00 } },
@@ -42,6 +44,7 @@ pub fn init() CPU {
         .PC = 0x100,
         .SP = 0xFFFE,
         .IME = false,
+        .halted = false,
     };
 }
 
@@ -58,8 +61,10 @@ const Op = enum(u8) {
 
     dec_b = 0x05,
     dec_bc = 0x0b,
+    inc_a = 0x3C,
     inc_c = 0x0C,
     inc_hl = 0x23,
+    inc_mhl = 0x34,
     dec_c = 0x0d,
 
     dec_hl = 0x35,
@@ -90,7 +95,9 @@ const Op = enum(u8) {
     ld_a__de = 0x1a,
     ld_e__hl = 0x5E,
     ld_d__hl = 0x56,
-    ld_hl_a = 0x32,
+
+    ld_hl_a = 0x77,
+    ldd_hl_a = 0x32,
     ld_hl_ib = 0x36,
     ld_ib_a = 0xE0,
     ld_mc_a = 0xE2,
@@ -114,6 +121,7 @@ const Op = enum(u8) {
 
     call_iw = 0xCD,
 
+    ret_nz = 0xC0,
     ret_z = 0xC8,
     ret = 0xC9,
 
@@ -151,6 +159,7 @@ const Op = enum(u8) {
 
     di = 0xF3,
     ei = 0xFB,
+    halt = 0x76,
 };
 
 const CbOp = enum(u8) {
@@ -227,7 +236,24 @@ fn pop_w(self: *CPU, mem: *Mem) u16 {
     return (high << 8) | low;
 }
 
-pub fn tick(self: *CPU, mem: *Mem) void {
+pub const MHz = 4194304;
+const CYCLES_PER_MS = MHz / 1000;
+
+pub fn tick(self: *CPU, mem: *Mem, dt: i64) void {
+    var cycles = dt * CYCLES_PER_MS;
+    std.debug.print("Run {d}ms = {d} cycles\n", .{ dt, cycles });
+
+    while (cycles >= 4) {
+        self.step(mem);
+        if (cycles >= 4) cycles -= 4;
+    }
+}
+
+pub fn step(self: *CPU, mem: *Mem) void {
+    mem.lcd.LY +%= 1; // TODO
+
+    if (self.halted) return;
+
     const opcode = std.meta.intToEnum(Op, mem.read(self.PC)) catch {
         std.debug.panic("[{x}]: Unsupported opcode {x}\n", .{ self.PC, mem.read(self.PC) });
     };
@@ -300,6 +326,7 @@ pub fn tick(self: *CPU, mem: *Mem) void {
             self.BC.r8.C = self.sub_with_carry(self.BC.r8.C, 1);
         },
 
+        .inc_a => self.AF.r8.A = self.add_with_carry(self.AF.r8.A, 1),
         .inc_c => self.BC.r8.C = self.add_with_carry(self.BC.r8.C, 1),
         .inc_e => self.DE.r8.E = self.add_with_carry(self.DE.r8.E, 1),
         .inc_l => self.HL.r8.L = self.add_with_carry(self.HL.r8.L, 1),
@@ -307,6 +334,9 @@ pub fn tick(self: *CPU, mem: *Mem) void {
         .inc_hl => {
             self.HL.r16 = self.add_with_carry_w(self.HL.r16, 1);
         },
+
+        .inc_mhl => mem.write(self.HL.r16, self.add_with_carry(mem.read(self.HL.r16), 1)),
+
         .inc_de => {
             self.DE.r16 = self.add_with_carry_w(self.DE.r16, 1);
         },
@@ -326,7 +356,12 @@ pub fn tick(self: *CPU, mem: *Mem) void {
         .ld_de_a => {
             mem.write(self.DE.r16, self.AF.r8.A);
         },
+
         .ld_hl_a => {
+            mem.write(self.HL.r16, self.AF.r8.A);
+        },
+
+        .ldd_hl_a => {
             mem.write(self.HL.r16, self.AF.r8.A);
             self.HL.r16 -= 1;
         },
@@ -491,6 +526,10 @@ pub fn tick(self: *CPU, mem: *Mem) void {
         .ret => {
             self.PC = self.pop_w(mem);
         },
+
+        .ret_nz => {
+            if (!self.AF.flags.Z) self.PC = self.pop_w(mem);
+        },
         .ret_z => {
             if (self.AF.flags.Z) self.PC = self.pop_w(mem);
         },
@@ -513,6 +552,8 @@ pub fn tick(self: *CPU, mem: *Mem) void {
                 },
             }
         },
+
+        .halt => self.halted = true,
     }
 
     std.debug.print("\t\t-- AF: {X:0>4} BC: {X:0>4} DE: {X:0>4} HL: {X:0>4}\n", .{ self.AF.r16, self.BC.r16, self.DE.r16, self.HL.r16 });
