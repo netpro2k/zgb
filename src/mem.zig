@@ -113,7 +113,7 @@ pub fn read(self: Mem, addr: u16) u8 {
 
         0xFEA0...0xFEFF => return 0, // Intentionally unused
 
-        0xFF00 => return self.JOYP,
+        0xFF00 => return 0xFF, // TODO self.JOYP,
         0xFF01 => return self.SB,
         0xFF02 => return self.SC,
 

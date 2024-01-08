@@ -29,22 +29,26 @@ pub fn main() !void {
     while (true) {
         cpu.tick(&mem);
 
+        // TODO tetris waits on this, hardcode for now to get through to more interesting stuff
         if (cpu.PC == 0x282C) {
-            mem.lcd.LY = 0x91; // TODO tetris waits on this, hardcode for now to get through to more interesting stuff
+            mem.lcd.LY = 0x91;
+        }
+        if (cpu.PC == 0x0233) {
+            mem.lcd.LY = 0x94;
         }
 
-        if (cpu.PC == 0x27c9) {
-            step = true;
-        }
+        // if (cpu.PC == 0x02ED) {
+        //     step = true;
+        // }
 
         if (step) {
             const k = try stdin.readByte();
             if (k == 'c') step = false;
         }
 
-        if (true and (cpu.PC == 0x27d6)) {
+        if (cpu.PC == 0x02ED) {
             // _ = try stdin.readUntilDelimiterOrEof(&buffer, '\n');
-            std.debug.print("vram {any}\n\n", .{mem.vram});
+            // std.debug.print("vram {any}\n\n", .{mem.});
             for (0..128) |t| {
                 std.debug.print("tile {x}: ", .{t});
                 for (0..16) |i| {
@@ -52,6 +56,14 @@ pub fn main() !void {
                 }
                 std.debug.print("\n", .{});
             }
+
+            for (0..32) |y| {
+                for (0..32) |x| {
+                    std.debug.print("{X:0>2} ", .{mem.read(@intCast(0x9800 + (y * 32) + x))});
+                }
+                std.debug.print("\n", .{});
+            }
+
             return;
         }
     }
