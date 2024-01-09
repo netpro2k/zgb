@@ -13,8 +13,9 @@ pub fn main() !void {
 
     const allocator = std.heap.page_allocator;
 
-    // var file = try std.fs.cwd().openFile("./roms/Tetris.gb", .{});
-    var file = try std.fs.cwd().openFile("./roms/dr-mario.gb", .{});
+    var file = try std.fs.cwd().openFile("./roms/Tetris.gb", .{});
+    // var file = try std.fs.cwd().openFile("./roms/dr-mario.gb", .{});
+    // var file = try std.fs.cwd().openFile("./roms/cpu-01-special.gb", .{});
     defer file.close();
 
     var mem: Mem = undefined;
@@ -24,11 +25,10 @@ pub fn main() !void {
 
     mem.lcd.LY = 0x94; // TODO tetris waits on this, hardcode for now to get through to more interesting stuff
 
-    mem.lcd.LY = 0x91;
-
     std.debug.print("Read {d} bytes\n", .{rom.len});
 
     const stdin = std.io.getStdIn().reader();
+    _ = stdin;
 
     const SCREEN_WIDTH = 160;
     const SCREEN_HEIGHT = 144;
@@ -60,14 +60,38 @@ pub fn main() !void {
 
     const cur_pallete: [4]r.Color = .{ r.WHITE, r.GRAY, r.DARKGRAY, r.BLACK };
 
+    var debug_map_sel = false;
+
     var prev_time: i64 = std.time.milliTimestamp();
+    var tick: usize = 0;
+    _ = tick;
 
     while (!r.WindowShouldClose()) {
         const now = std.time.milliTimestamp();
         const dt = now - prev_time;
         prev_time = now;
 
-        cpu.tick(&mem, dt);
+        if (r.IsKeyPressed(r.KEY_S)) step = !step;
+
+        if (r.IsKeyPressed(r.KEY_V)) mem.IF.vblank = true;
+
+        if (r.IsKeyPressed(r.KEY_M)) debug_map_sel = !debug_map_sel;
+
+        mem.IF.vblank = true;
+
+        if (!step or r.IsKeyPressed(r.KEY_N)) {
+            cpu.tick(&mem, dt);
+        }
+
+        if (cpu.IME) {
+            if (mem.IF.vblank and mem.IE.vblank) {
+                cpu.IME = false;
+                cpu.halted = false;
+                // std.debug.print("VBLANK\n", .{});
+                mem.IF.vblank = false;
+                cpu.call(&mem, 0x40);
+            }
+        }
 
         // TODO tetris waits on this, hardcode for now to get through to more interesting stuff
         if (cpu.PC == 0x282C) {
@@ -80,11 +104,6 @@ pub fn main() !void {
         // if (cpu.PC == 0x02ED) {
         //     step = true;
         // }
-
-        if (step) {
-            const k = try stdin.readByte();
-            if (k == 'c') step = false;
-        }
 
         if (cpu.PC == 0x02ED) {
             // return;
@@ -109,15 +128,16 @@ pub fn main() !void {
         const bg_debug_pixels = @as([*]r.Color, @ptrCast(bg_debug_img.data.?));
         for (0..32) |ty| {
             for (0..32) |tx| {
-                const t = mem.read(@intCast(0x9800 + (ty * 32) + tx));
+                const start_offset: u16 = if (debug_map_sel) 0x09C00 else 0x9800;
+                const t = mem.read(@intCast(start_offset + (ty * 32) + tx));
 
                 var offset: u16 = 0;
-                if (mem.lcd.LCDC.bg_tiles) {
-                    offset = 0x8000 + (@as(u16, @intCast(t)) * 16);
-                } else {
-                    const rt: i8 = @as(i8, @bitCast(t));
-                    offset = @as(u16, @intCast(0x9000 + @as(i32, rt) * 16));
-                }
+                // if (mem.lcd.LCDC.bg_tiles) {
+                offset = 0x8000 + (@as(u16, @intCast(t)) * 16);
+                // } else {
+                //     const rt: i8 = @as(i8, @bitCast(t));
+                //     offset = @as(u16, @intCast(0x9000 + @as(i32, rt) * 16));
+                // }
 
                 for (0..8) |line| {
                     const high = mem.read(@intCast(offset + line * 2));
@@ -130,7 +150,6 @@ pub fn main() !void {
                     }
                 }
             }
-            std.debug.print("\n", .{});
         }
         r.UpdateTexture(bg_debug_tex, bg_debug_img.data);
 
@@ -153,6 +172,8 @@ pub fn main() !void {
         //
 
         r.EndDrawing();
+
+        if (r.IsKeyDown(r.KEY_D)) cpu.debug = !cpu.debug;
     }
 }
 

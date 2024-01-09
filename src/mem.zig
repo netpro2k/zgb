@@ -87,12 +87,15 @@ OBP1: Pallete,
 SB: u8,
 SC: u8,
 
+TIMA: u8,
 TMA: u8,
 TAC: u8,
 
 JOYP: u8,
 
 lcd: LCD,
+
+DIV: u8,
 
 var first_read = false;
 
@@ -108,6 +111,9 @@ pub fn read(self: Mem, addr: u16) u8 {
         0xC000...0xDFFF => { // Work RAM
             return self.work_ram[addr - 0xC000];
         },
+        0xE000...0xFDFF => { // Echo Work RAM
+            return self.work_ram[addr - 0xE000];
+        },
 
         0xFE00...0xFE9F => return @as([40 * 4]u8, @bitCast(self.oam))[addr - 0xFE00],
 
@@ -116,13 +122,17 @@ pub fn read(self: Mem, addr: u16) u8 {
         0xFF00 => return 0xFF, // TODO self.JOYP,
         0xFF01 => return self.SB,
         0xFF02 => return self.SC,
-
+        0xFF03 => return 0xFF, // unmapped
+        0xFF04 => return self.DIV,
+        0xFF05 => return self.TIMA,
         0xFF06 => return self.TMA,
         0xFF07 => return self.TAC,
-
+        0xFF08...0xFF0E => return 0xFF, // unmapped
         0xFF0F => return @bitCast(self.IF),
 
         0xFF10...0xFF26 => return self.todo_audio[addr - 0xFF10],
+
+        0xFF27...0xFF2F => return 0xFF, // unmapped
 
         0xFF40 => return @bitCast(self.lcd.LCDC),
         0xFF41 => return @bitCast(self.lcd.STAT),
@@ -131,14 +141,15 @@ pub fn read(self: Mem, addr: u16) u8 {
         0xFF44 => return self.lcd.LY,
         0xFF45 => return self.lcd.LYC,
 
-        0xFF4A => return self.lcd.WY,
-        0xFF4B => return self.lcd.WX,
-
         0xFF47 => return @bitCast(self.BGP),
         0xFF48 => return @bitCast(self.OBP0),
         0xFF49 => return @bitCast(self.OBP1),
 
+        0xFF4A => return self.lcd.WY,
+        0xFF4B => return self.lcd.WX,
+
         0xFF80...0xFFFE => { // High RAM
+            // if (addr == 0xFF85) return 1; // TODO
             return self.high_ram[addr - 0xFF80];
         },
 
@@ -146,7 +157,8 @@ pub fn read(self: Mem, addr: u16) u8 {
             return @bitCast(self.IE);
         },
         else => {
-            std.debug.panic("Unimplemented memory read {X:0>4}", .{addr});
+            std.debug.print("Unimplemented memory read {X:0>4}\n", .{addr});
+            return 0xFF;
         },
     }
 }
@@ -168,6 +180,10 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
             self.vram[addr - 0x8000] = value;
         },
 
+        0xE000...0xFDFF => { // Echo Work RAM
+            self.work_ram[addr - 0xE000] = value;
+        },
+
         0xFE00...0xFE9F => @as([*]u8, @ptrCast(&self.oam))[addr - 0xFE00] = value,
 
         0xFEA0...0xFEFF => {}, // Intentionally unused
@@ -177,19 +193,38 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         0xFF00 => self.JOYP = value,
         0xFF01 => self.SB = value,
         0xFF02 => self.SC = value,
-
+        0xFF03 => {}, // unmapped
+        0xFF04 => self.DIV = 0,
+        0xFF05 => self.TIMA = value,
         0xFF06 => self.TMA = value,
         0xFF07 => self.TAC = value,
-
+        0xFF08...0xFF0E => {}, // unmapped
         0xFF0F => self.IF = @bitCast(value),
+
+        0xFF27...0xFF2F => {}, // unmapped
+        0xFF30...0xFF3F => {}, // TODO wave pattern
 
         0xFF40 => self.lcd.LCDC = @bitCast(value),
         0xFF41 => self.lcd.STAT = @bitCast(value),
         0xFF42 => self.lcd.SCY = value,
         0xFF43 => self.lcd.SCX = value,
 
+        0xFF44 => {}, // LY, readonly
+        0xFF45 => self.lcd.LYC = value,
+
         0xFF4A => self.lcd.WY = value,
         0xFF4B => self.lcd.WX = value,
+
+        // If value $XY is written, the transfer will copy $XY00-$XY9F to $FE00-$FE9F.
+        0xFF46 => {
+            // TODO this needs to handle reading from anyway, also its not suposed to just happen instantly
+            const start: u16 = (@as(u16, value) << 8);
+            // std.debug.print("Starting DMA {X}-{X}\n", .{ start, start + 0x9F });
+            for (0..0x9F + 1) |i| {
+                const iu = @as(u16, @intCast(i));
+                self.write(0xFE00 + iu, self.read(start + iu));
+            }
+        },
 
         0xFF47 => self.BGP = @bitCast(value),
         0xFF48 => self.OBP0 = @bitCast(value),
@@ -206,7 +241,7 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         },
 
         else => {
-            std.debug.panic("Unimplemented memory write {X:0>4}", .{addr});
+            std.debug.print("Unimplemented memory write {X:0>4}\n", .{addr});
         },
     }
 }
