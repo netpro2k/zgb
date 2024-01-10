@@ -4,6 +4,19 @@ const Mem = @import("mem.zig");
 
 const r = @cImport(@cInclude("raylib.h"));
 
+fn cpu_thread(cpu: *CPU, mem: *Mem) !void {
+    var prev_time: i64 = std.time.milliTimestamp();
+
+    while (true) {
+        const now = std.time.milliTimestamp();
+        const dt = now - prev_time;
+        prev_time = now;
+
+        cpu.tick(mem, dt);
+        std.time.sleep(1000);
+    }
+}
+
 pub fn main() !void {
     r.InitWindow(960, 960, "ZGB");
     r.SetTargetFPS(60);
@@ -18,7 +31,7 @@ pub fn main() !void {
     var file = try std.fs.cwd().openFile(args[1], .{});
     defer file.close();
 
-    var mem: Mem = undefined;
+    var mem: Mem = Mem.init();
 
     const rom = try file.readToEndAlloc(allocator, 1024 * 32);
     std.mem.copy(u8, &mem.rom, rom);
@@ -29,6 +42,8 @@ pub fn main() !void {
 
     const stdin = std.io.getStdIn().reader();
     _ = stdin;
+
+    _ = try std.Thread.spawn(.{}, cpu_thread, .{ &cpu, &mem });
 
     const SCREEN_WIDTH = 160;
     const SCREEN_HEIGHT = 144;
@@ -61,52 +76,39 @@ pub fn main() !void {
     while (!r.WindowShouldClose()) {
         const now = std.time.milliTimestamp();
         const dt = now - prev_time;
+        _ = dt;
         prev_time = now;
 
         if (r.IsKeyPressed(r.KEY_S)) step = !step;
 
-        if (r.IsKeyPressed(r.KEY_V)) mem.IF.vblank = true;
+        if (r.IsKeyPressedRepeat(r.KEY_M)) debug_map_sel = !debug_map_sel;
 
-        if (r.IsKeyPressed(r.KEY_M)) debug_map_sel = !debug_map_sel;
+        if (!step or r.IsKeyPressed(r.KEY_N)) {}
 
-        mem.IF.vblank = true;
+        mem.joypad_state.start = r.IsKeyDown(r.KEY_ENTER);
+        mem.joypad_state.select = r.IsKeyDown(r.KEY_LEFT_SHIFT);
+        mem.joypad_state.a = r.IsKeyDown(r.KEY_Z);
+        mem.joypad_state.b = r.IsKeyDown(r.KEY_X);
+        mem.joypad_state.up = r.IsKeyDown(r.KEY_UP);
+        mem.joypad_state.down = r.IsKeyDown(r.KEY_DOWN);
+        mem.joypad_state.left = r.IsKeyDown(r.KEY_LEFT);
+        mem.joypad_state.right = r.IsKeyDown(r.KEY_RIGHT);
 
-        if (!step or r.IsKeyPressed(r.KEY_N)) {
-            cpu.tick(&mem, dt);
-        }
-
-        if (cpu.IME) {
-            if (mem.IF.vblank and mem.IE.vblank) {
-                cpu.IME = false;
-                cpu.halted = false;
-                // std.debug.print("VBLANK\n", .{});
-                mem.IF.vblank = false;
-                cpu.call(&mem, 0x40);
-            }
-        }
-
-        // TODO tetris waits on this, hardcode for now to get through to more interesting stuff
-        if (cpu.PC == 0x282C) {
-            mem.lcd.LY = 0x91;
-        }
-        if (cpu.PC == 0x0233) {
-            mem.lcd.LY = 0x94;
-        }
-
-        // if (cpu.PC == 0x02ED) {
+        // if (cpu.halted) {
         //     step = true;
+        //     cpu.halted = false;
         // }
 
-        if (cpu.PC == 0x02ED) {
-            // return;
-        }
+        // if (cpu.debug) {
+        // step = true;
+        // }
 
         const tile_debug_pixels = @as([*]r.Color, @ptrCast(tile_debug_img.data.?));
         for (0..384) |t| {
             const offset = 0x8000 + (t * 16);
             for (0..8) |line| {
-                const high = mem.read(@intCast(offset + line * 2));
-                const low = mem.read(@intCast(offset + line * 2 + 1));
+                const high = mem.read_silent(@intCast(offset + line * 2));
+                const low = mem.read_silent(@intCast(offset + line * 2 + 1));
                 for (0..8) |px| {
                     const c = bit(low, 7 - px) | bit(high, 7 - px) << 1;
                     const x = ((t % 16) * 9 + px);
@@ -121,10 +123,10 @@ pub fn main() !void {
         for (0..32) |ty| {
             for (0..32) |tx| {
                 const start_offset: u16 = if (debug_map_sel) 0x09C00 else 0x9800;
-                const t = mem.read(@intCast(start_offset + (ty * 32) + tx));
+                const t = mem.read_silent(@intCast(start_offset + (ty * 32) + tx));
 
                 var offset: u16 = 0;
-                // if (mem.lcd.LCDC.bg_tiles) {
+                // if (mem.lcd.LCDC.bg_win_tiles) {
                 offset = 0x8000 + (@as(u16, @intCast(t)) * 16);
                 // } else {
                 //     const rt: i8 = @as(i8, @bitCast(t));
@@ -132,8 +134,8 @@ pub fn main() !void {
                 // }
 
                 for (0..8) |line| {
-                    const high = mem.read(@intCast(offset + line * 2));
-                    const low = mem.read(@intCast(offset + line * 2 + 1));
+                    const high = mem.read_silent(@intCast(offset + line * 2));
+                    const low = mem.read_silent(@intCast(offset + line * 2 + 1));
                     for (0..8) |px| {
                         const c = bit(low, 7 - px) | bit(high, 7 - px) << 1;
                         const x = (tx * 8 + px);
@@ -159,10 +161,12 @@ pub fn main() !void {
 
         r.DrawText("Map", 10, 387, 12, r.BLACK);
         r.DrawTextureEx(bg_debug_tex, .{ .x = 11, .y = 401 }, 0, 2, r.WHITE);
-        r.DrawRectangleLines(11 + @as(c_int, @intCast(mem.lcd.SCX)), 401 + @as(c_int, @intCast(mem.lcd.SCY)), SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2, r.LIGHTGRAY);
+        const SCX = @as(c_int, @intCast(mem.lcd.SCX));
+        const SCY = @as(c_int, @intCast(mem.lcd.SCY));
+        r.DrawRectangleLines(11 + SCX * 2, 401 + SCY * 2, SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2, r.LIGHTGRAY);
         r.DrawRectangleLines(10, 400, bg_debug_img.width * 2 + 2, bg_debug_img.height * 2 + 2, r.BLACK);
         //
-        if (r.IsKeyDown(r.KEY_D)) cpu.debug = !cpu.debug;
+        if (r.IsKeyPressed(r.KEY_D)) cpu.debug = !cpu.debug;
 
         r.EndDrawing();
     }

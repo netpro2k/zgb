@@ -12,7 +12,7 @@ pub const Flags = packed struct {
     Z: bool,
 };
 
-const CPU = @This();
+pub const CPU = @This();
 
 AF: packed union {
     r16: u16,
@@ -35,6 +35,7 @@ SP: u16,
 PC: u16,
 
 IME: bool,
+enabling_ime: bool,
 
 halted: bool,
 debug: bool,
@@ -50,6 +51,7 @@ pub fn init() CPU {
         .IME = false,
         .halted = false,
         .debug = false,
+        .enabling_ime = false,
     };
 }
 
@@ -318,28 +320,86 @@ pub fn call(self: *CPU, mem: *Mem, addr: u16) void {
     self.PC = addr;
 }
 
+pub const Interupt = enum(u3) { vblank = 0, lcd_stat, timer, serial, joypad };
+
+pub fn trigger_interupt(self: *CPU, mem: *Mem, interupt: Interupt) void {
+    // std.debug.print("INTERUPT {any}\n", .{interupt});
+    const addr: u16 = switch (interupt) {
+        .vblank => 0x40,
+        .lcd_stat => 0x48,
+        .timer => 0x50,
+        .serial => 0x58,
+        .joypad => 0x60,
+    };
+
+    // std.debug.print("Disable IME\n", .{});
+    self.IME = false;
+    self.halted = false;
+
+    var if8 = @as(*u8, @ptrCast(&mem.IF));
+    if8.* &= ~(@as(u8, 1) << @intFromEnum(interupt));
+
+    self.call(mem, addr);
+
+    mem.pending_cycles += 3;
+}
+
 pub const MHz = 4194304;
 const CYCLES_PER_MS = MHz / 1000;
 
 pub fn tick(self: *CPU, mem: *Mem, dt: i64) void {
     var cycles = dt * CYCLES_PER_MS;
-    // if (self.debug) std.debug.print("Run {d}ms = {d} cycles\n\n\n", .{ dt, cycles });
+    // std.debug.print("Run {d}ms = {d} cycles\n\n\n", .{ dt, cycles });
 
-    while (cycles >= 4) {
-        self.step(mem);
-        mem.tick(4);
-        if (cycles >= 4) cycles -= 4;
-        if (self.debug) return;
+    while (cycles > 0) {
+        // if (!self.debug and self.PC == 0x041f) {
+        //     self.debug = true;
+        //     return;
+        // }
+
+        if (self.enabling_ime) {
+            // std.debug.print("Enable IME\n", .{});
+
+            self.IME = true;
+            self.enabling_ime = false;
+        }
+
+        if (self.halted and @as(u8, @bitCast(mem.IF)) != 0) self.halted = false;
+
+        if (!self.halted) self.step(mem);
+        mem.pending_cycles += 1;
+
+        if (self.IME) {
+            if (mem.IF.vblank and mem.IE.vblank) {
+                self.trigger_interupt(mem, .vblank);
+            } else if (mem.IF.lcd_stat and mem.IE.lcd_stat) {
+                self.trigger_interupt(mem, .lcd_stat);
+            } else if (mem.IF.timer and mem.IE.timer) {
+                self.trigger_interupt(mem, .timer);
+            } else if (mem.IF.serial and mem.IE.serial) {
+                self.trigger_interupt(mem, .serial);
+            } else if (mem.IF.joypad and mem.IE.joypad) {
+                self.trigger_interupt(mem, .joypad);
+            }
+        }
+
+        if (cycles >= mem.pending_cycles * 4) {
+            cycles -= mem.pending_cycles * 4;
+        } else {
+            // std.debug.print("pending {d}\n", .{mem.pending_cycles});
+            cycles = 0;
+        }
+
+        mem.tick(self);
+
+        // std.debug.print("post pending {d}\n", .{mem.pending_cycles});
     }
 }
 
 pub fn step(self: *CPU, mem: *Mem) void {
-    mem.lcd.LY +%= 1; // TODO
-
-    if (self.halted) return;
-
-    const opcode = std.meta.intToEnum(Op, mem.read(self.PC)) catch {
-        std.debug.panic("[{x}]: Unsupported opcode {x}\n", .{ self.PC, mem.read(self.PC) });
+    const raw_opcode = mem.read(self.PC);
+    const opcode = std.meta.intToEnum(Op, raw_opcode) catch {
+        std.debug.panic("[{x}]: Unsupported opcode {x}\n", .{ self.PC, raw_opcode });
     };
 
     if (self.debug) std.debug.print("[{X:0>4}]: {s}\t", .{ self.PC, @tagName(opcode) });
@@ -529,7 +589,7 @@ pub fn step(self: *CPU, mem: *Mem) void {
 
         .ldd_a__hl => {
             self.AF.r8.A = mem.read(self.HL.r16);
-            self.HL.r16 -= 1;
+            self.HL.r16 -%= 1;
         },
 
         .ld_a__de => self.AF.r8.A = mem.read(self.DE.r16),
@@ -673,8 +733,11 @@ pub fn step(self: *CPU, mem: *Mem) void {
         .or_a_hl => self.AF.r8.A = self.alu_or(self.AF.r8.A, mem.read(self.HL.r16)),
         .or_a_ib => self.AF.r8.A = self.alu_or(self.AF.r8.A, self.read_ib(mem)),
 
-        .di => self.IME = false,
-        .ei => self.IME = true,
+        .di => {
+            self.IME = false;
+            // std.debug.print("Disable IME\n", .{});
+        },
+        .ei => self.enabling_ime = true,
 
         .cp_a_a => _ = self.alu_sub(self.AF.r8.A, self.AF.r8.A),
         .cp_a_b => _ = self.alu_sub(self.AF.r8.A, self.BC.r8.B),
@@ -720,7 +783,7 @@ pub fn step(self: *CPU, mem: *Mem) void {
         .ret => self.PC = self.pop_w(mem),
         .reti => {
             self.PC = self.pop_w(mem);
-            self.IME = true;
+            self.enabling_ime = true;
         },
 
         .ret_nz => {
@@ -1087,7 +1150,7 @@ pub fn step(self: *CPU, mem: *Mem) void {
         },
     }
 
-    if (self.debug) std.debug.print("\t\t-- AF: {X:0>4} BC: {X:0>4} DE: {X:0>4} HL: {X:0>4} Z: {any}\n", .{ self.AF.r16, self.BC.r16, self.DE.r16, self.HL.r16, self.AF.flags.Z });
+    if (self.debug) std.debug.print("\t\t-- AF: {X:0>4} BC: {X:0>4} DE: {X:0>4} HL: {X:0>4} IF: {b:0>5} IME: {any}\n", .{ self.AF.r16, self.BC.r16, self.DE.r16, self.HL.r16, @as(u8, @bitCast(mem.IF)), self.IME });
 }
 
 test "register arrangement" {

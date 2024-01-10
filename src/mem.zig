@@ -1,4 +1,27 @@
 const std = @import("std");
+const CPU = @import("cpu.zig").CPU;
+const Interupt = @import("cpu.zig").Interupt;
+
+pub const JoypadState = packed struct {
+    right: bool,
+    left: bool,
+    up: bool,
+    down: bool,
+    a: bool,
+    b: bool,
+    select: bool,
+    start: bool,
+};
+
+pub const JoypadControl = packed struct {
+    a_right: bool,
+    b_left: bool,
+    select_up: bool,
+    start_down: bool,
+    sel_dpad: bool,
+    sel_buttons: bool,
+    _pad: u2,
+};
 
 pub const Irq = packed struct {
     vblank: bool,
@@ -16,11 +39,24 @@ pub const SerialControl = packed struct {
     transfer_en: bool,
 };
 
+pub const TimerControl = packed struct {
+    clock_select: u2,
+    enable: bool,
+    _pad: u5,
+};
+
+pub const LCDMode = enum(u2) {
+    hblank,
+    vblank,
+    oam_scan,
+    drawing,
+};
+
 pub const LCDControl = packed struct {
     bg_en: bool,
     obj_en: bool,
     bg_tilemap: bool,
-    bg_tiles: bool,
+    bg_win_tiles: bool,
     win_en: bool,
     win_tilemap: bool,
     lcd_en: bool,
@@ -28,13 +64,13 @@ pub const LCDControl = packed struct {
 };
 
 pub const LCDStatus = packed struct {
-    mode: u2,
+    mode: LCDMode,
     ly_coincidence: bool,
     interupt_sel: packed struct {
-        mode_0: bool, // HBlank
-        mode_1: bool, // VBlank
-        mode_2: bool, // OAM scan
-        ly_coincidence: bool,
+        hblank: bool,
+        vblank: bool,
+        oam_scan: bool,
+        lyc: bool,
     },
     _pad: u1 = 0,
 };
@@ -48,6 +84,7 @@ const LCD = struct {
     WY: u8,
     LY: u8,
     LYC: u8,
+    cur_x: u16 = 0,
 };
 
 const Color = enum { white, light, dark, black };
@@ -96,17 +133,53 @@ SC: SerialControl,
 
 TIMA: u8,
 TMA: u8,
-TAC: u8,
+TAC: TimerControl,
+prev_result: bool,
 
-JOYP: u8,
+JOYP: JoypadControl,
 
 lcd: LCD,
 
-DIV: u8,
+DIV: u16,
+
+pending_cycles: u32,
+joypad_state: JoypadState,
 
 var first_read = false;
 
-pub fn read(self: Mem, addr: u16) u8 {
+pub fn init() Mem {
+    return Mem{
+        .rom = undefined,
+        .work_ram = undefined,
+        .high_ram = undefined,
+        .vram = undefined,
+        .oam = undefined,
+        .todo_audio = undefined,
+        .IF = @bitCast(@as(u8, 0)),
+        .IE = undefined,
+        .BGP = undefined,
+        .OBP0 = undefined,
+        .OBP1 = undefined,
+        .SB = undefined,
+        .SC = undefined,
+        .TIMA = 0,
+        .TMA = 0,
+        .TAC = undefined,
+        .prev_result = false,
+        .JOYP = @bitCast(@as(u8, 0xFF)),
+        .lcd = undefined,
+        .DIV = 0,
+        .pending_cycles = 0,
+        .joypad_state = @bitCast(@as(u8, 0x00)),
+    };
+}
+
+pub fn read(self: *Mem, addr: u16) u8 {
+    self.pending_cycles += 1;
+    return self.read_silent(addr);
+}
+
+pub fn read_silent(self: *Mem, addr: u16) u8 {
     switch (addr) {
         0x0000...0x7FFF => { // ROM
             return self.rom[addr];
@@ -126,14 +199,14 @@ pub fn read(self: Mem, addr: u16) u8 {
 
         0xFEA0...0xFEFF => return 0, // Intentionally unused
 
-        0xFF00 => return 0xFF, // TODO self.JOYP,
+        0xFF00 => return @bitCast(self.JOYP),
         0xFF01 => return self.SB,
         0xFF02 => return @bitCast(self.SC),
         0xFF03 => return 0xFF, // unmapped
-        0xFF04 => return self.DIV,
+        0xFF04 => return @truncate(self.DIV >> 8),
         0xFF05 => return self.TIMA,
         0xFF06 => return self.TMA,
-        0xFF07 => return self.TAC,
+        0xFF07 => return @bitCast(self.TAC),
         0xFF08...0xFF0E => return 0xFF, // unmapped
         0xFF0F => return @bitCast(self.IF),
 
@@ -164,17 +237,19 @@ pub fn read(self: Mem, addr: u16) u8 {
             return @bitCast(self.IE);
         },
         else => {
-            std.debug.print("Unimplemented memory read {X:0>4}\n", .{addr});
+            // std.debug.print("Unimplemented memory read {X:0>4}\n", .{addr});
             return 0xFF;
         },
     }
 }
 
-pub fn read_ff(self: Mem, addr_nib: u8) u8 {
+pub fn read_ff(self: *Mem, addr_nib: u8) u8 {
     return self.read(0xff00 + @as(u16, addr_nib));
 }
 
 pub fn write(self: *Mem, addr: u16, value: u8) void {
+    self.pending_cycles += 1;
+
     switch (addr) {
         0x0000...0x7FFF => {
             self.rom[addr] = value;
@@ -197,16 +272,26 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
 
         0xFF10...0xFF26 => self.todo_audio[addr - 0xFF10] = value,
 
-        0xFF00 => self.JOYP = value,
+        0xFF00 => {
+            const new: JoypadControl = @bitCast(value);
+            self.JOYP.sel_buttons = new.sel_buttons;
+            self.JOYP.sel_dpad = new.sel_dpad;
+        },
         0xFF01 => self.SB = value,
         0xFF02 => self.SC = @bitCast(value),
         0xFF03 => {}, // unmapped
         0xFF04 => self.DIV = 0,
         0xFF05 => self.TIMA = value,
         0xFF06 => self.TMA = value,
-        0xFF07 => self.TAC = value,
+        0xFF07 => {
+            self.TAC = @bitCast(value);
+            std.debug.print("WRITE TAC {x} {any}\n", .{ value, self.TAC });
+        },
         0xFF08...0xFF0E => {}, // unmapped
-        0xFF0F => self.IF = @bitCast(value),
+        0xFF0F => {
+            self.IF = @bitCast(value);
+            std.debug.print("WRITE IF {x} {any}\n", .{ value, self.IF });
+        },
 
         0xFF27...0xFF2F => {}, // unmapped
         0xFF30...0xFF3F => {}, // TODO wave pattern
@@ -225,12 +310,14 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         // If value $XY is written, the transfer will copy $XY00-$XY9F to $FE00-$FE9F.
         0xFF46 => {
             // TODO this needs to handle reading from anyway, also its not suposed to just happen instantly
-            const start: u16 = (@as(u16, value) << 8);
+            // const start: u16 = (@as(u16, value) << 8);
             // std.debug.print("Starting DMA {X}-{X}\n", .{ start, start + 0x9F });
-            for (0..0x9F + 1) |i| {
-                const iu = @as(u16, @intCast(i));
-                self.write(0xFE00 + iu, self.read(start + iu));
-            }
+            // const prev_pending = self.pending_cycles;
+            // for (0..0x9F + 1) |i| {
+            //     const iu = @as(u16, @intCast(i));
+            //     self.write(0xFE00 + iu, self.read(start + iu));
+            // }
+            // self.pending_cycles = prev_pending;
         },
 
         0xFF47 => self.BGP = @bitCast(value),
@@ -245,10 +332,11 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
 
         0xFFFF => {
             self.IE = @bitCast(value);
+            std.debug.print("WRITE IE {x} {any}\n", .{ value, self.IE });
         },
 
         else => {
-            std.debug.print("Unimplemented memory write {X:0>4}\n", .{addr});
+            // std.debug.print("Unimplemented memory write {X:0>4}\n", .{addr});
         },
     }
 }
@@ -260,14 +348,126 @@ pub fn write_ff(self: *Mem, addr_nib: u8, value: u8) void {
 var debug_output: [1024]u8 = undefined;
 var debug_idx: usize = 0;
 
-pub fn tick(self: *Mem, clocks: usize) void {
-    for (0..clocks) |_| {
-        if (self.SC.transfer_en) {
-            self.SC.transfer_en = false;
-            debug_output[debug_idx] = self.SB;
-            self.SB = 0xFF;
-            debug_idx += 1;
-            std.debug.print("SERIAL: '{s}'\n", .{debug_output});
+fn step_timer(self: *Mem, cpu: *CPU) void {
+    _ = cpu;
+    self.DIV +%= 1;
+
+    if (!self.TAC.enable) return;
+
+    const bit: u4 = switch (self.TAC.clock_select) {
+        0b00 => 9,
+        0b01 => 3,
+        0b10 => 5,
+        0b11 => 7,
+    };
+
+    const result = ((self.DIV >> bit) & 1) & @intFromBool(self.TAC.enable) != 0;
+
+    // std.debug.print("DIV {b} bit {d} res: {any} TACe {any} \n", .{ self.DIV, bit, result, self.TAC.enable });
+    if (self.prev_result and !result) { // falling edge
+        self.TIMA +%= 1;
+        if (self.TIMA == 0x00) {
+            self.TIMA = self.TMA;
+            self.IF.timer = true;
         }
+    }
+    self.prev_result = result;
+}
+
+fn step_ppu(self: *Mem) void {
+    const start_mode = self.lcd.STAT.mode;
+    switch (self.lcd.STAT.mode) {
+        .oam_scan => {
+            self.lcd.cur_x += 1;
+            if (self.lcd.cur_x >= 80) {
+                self.lcd.STAT.mode = .drawing;
+            }
+        },
+        .drawing => {
+            self.lcd.cur_x += 1;
+            if (self.lcd.cur_x >= 172) {
+                self.lcd.STAT.mode = .hblank;
+            }
+        },
+        .hblank => {
+            self.lcd.cur_x += 1;
+            if (self.lcd.cur_x >= 456) {
+                self.lcd.cur_x = 0;
+                self.lcd.LY += 1;
+                if (self.lcd.LY > 143) {
+                    self.lcd.STAT.mode = .vblank;
+                } else {
+                    self.lcd.STAT.mode = .oam_scan;
+                }
+            }
+        },
+        .vblank => {
+            self.lcd.cur_x += 1;
+            if (self.lcd.cur_x >= 456) {
+                self.lcd.STAT.mode = .drawing;
+                self.lcd.LY += 1;
+                if (self.lcd.LY > 153) {
+                    self.lcd.STAT.mode = .oam_scan;
+                    self.lcd.LY = 0;
+                    self.IF.vblank = true;
+                }
+            }
+        },
+    }
+
+    const mode_trigger = switch (self.lcd.STAT.mode) {
+        .oam_scan => self.lcd.STAT.interupt_sel.oam_scan,
+        .drawing => false,
+        .hblank => self.lcd.STAT.interupt_sel.hblank,
+        .vblank => self.lcd.STAT.interupt_sel.vblank,
+    } and self.lcd.STAT.mode != start_mode;
+    const lyc_trigger = self.lcd.STAT.interupt_sel.lyc and self.lcd.LY == self.lcd.LYC;
+
+    if (mode_trigger or lyc_trigger) {
+        self.IF.lcd_stat = true;
+    }
+}
+
+fn step(self: *Mem, cpu: *CPU) void {
+    if (self.SC.transfer_en) {
+        self.SC.transfer_en = false;
+        debug_output[debug_idx] = self.SB;
+        self.SB = 0xFF;
+        debug_idx = (debug_idx + 1) % 1024;
+        // std.debug.print("SERIAL: '{s}'\n", .{debug_output});
+    }
+    self.step_timer(cpu);
+    self.step_ppu();
+
+    // TODO this can be directly bit coppied
+    if (!self.JOYP.sel_buttons) {
+        // if (self.JOYP.start_down and self.joypad_state.start) {
+        //     self.IF.joypad = true;
+        //     std.debug.print("START\n", .{});
+        // }
+        self.JOYP.a_right = !self.joypad_state.a;
+        self.JOYP.b_left = !self.joypad_state.b;
+        self.JOYP.select_up = !self.joypad_state.select;
+        self.JOYP.start_down = !self.joypad_state.start;
+    } else if (!self.JOYP.sel_dpad) {
+        self.JOYP.a_right = !self.joypad_state.right;
+        self.JOYP.b_left = !self.joypad_state.left;
+        self.JOYP.select_up = !self.joypad_state.up;
+        self.JOYP.start_down = !self.joypad_state.down;
+    } else {
+        self.JOYP.a_right = true;
+        self.JOYP.b_left = true;
+        self.JOYP.select_up = true;
+        self.JOYP.start_down = true;
+    }
+}
+
+pub fn tick(self: *Mem, cpu: *CPU) void {
+    // std.debug.print("Pending: {d}\n", .{self.pending_cycles});
+    while (self.pending_cycles > 0) {
+        for (0..4) |_| {
+            self.step(cpu);
+        }
+        self.pending_cycles -= 1;
     }
 }
