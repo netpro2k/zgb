@@ -12,10 +12,10 @@ pub fn main() !void {
     var cpu = CPU.init();
 
     const allocator = std.heap.page_allocator;
+    var args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    var file = try std.fs.cwd().openFile("./roms/Tetris.gb", .{});
-    // var file = try std.fs.cwd().openFile("./roms/dr-mario.gb", .{});
-    // var file = try std.fs.cwd().openFile("./roms/cpu-01-special.gb", .{});
+    var file = try std.fs.cwd().openFile(args[1], .{});
     defer file.close();
 
     var mem: Mem = undefined;
@@ -49,14 +49,6 @@ pub fn main() !void {
     defer r.UnloadImage(bg_debug_img);
     var bg_debug_tex = r.LoadTextureFromImage(bg_debug_img);
     defer r.UnloadTexture(bg_debug_tex);
-
-    std.debug.print("{any}", .{@as([*]u8, @ptrCast(tile_debug_img.data))[3]});
-    // var tile_debug_tex = r.LoadRenderTexture(16 * 8, 32 * 8);
-    // defer r.UnloadRenderTexture(tile_debug_tex);
-
-    // r.BeginTextureMode(tile_debug_tex);
-    // r.ClearBackground(r.BLACK);
-    // r.EndTextureMode();
 
     const cur_pallete: [4]r.Color = .{ r.WHITE, r.GRAY, r.DARKGRAY, r.BLACK };
 
@@ -170,10 +162,9 @@ pub fn main() !void {
         r.DrawRectangleLines(11 + @as(c_int, @intCast(mem.lcd.SCX)), 401 + @as(c_int, @intCast(mem.lcd.SCY)), SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2, r.LIGHTGRAY);
         r.DrawRectangleLines(10, 400, bg_debug_img.width * 2 + 2, bg_debug_img.height * 2 + 2, r.BLACK);
         //
+        if (r.IsKeyDown(r.KEY_D)) cpu.debug = !cpu.debug;
 
         r.EndDrawing();
-
-        if (r.IsKeyDown(r.KEY_D)) cpu.debug = !cpu.debug;
     }
 }
 

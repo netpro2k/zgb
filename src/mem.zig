@@ -9,6 +9,13 @@ pub const Irq = packed struct {
     _pad: u3 = 0,
 };
 
+pub const SerialControl = packed struct {
+    clock_select: u1,
+    cgb_clock_speed: u1,
+    _pad: u5,
+    transfer_en: bool,
+};
+
 pub const LCDControl = packed struct {
     bg_en: bool,
     obj_en: bool,
@@ -85,7 +92,7 @@ OBP0: Pallete,
 OBP1: Pallete,
 
 SB: u8,
-SC: u8,
+SC: SerialControl,
 
 TIMA: u8,
 TMA: u8,
@@ -121,7 +128,7 @@ pub fn read(self: Mem, addr: u16) u8 {
 
         0xFF00 => return 0xFF, // TODO self.JOYP,
         0xFF01 => return self.SB,
-        0xFF02 => return self.SC,
+        0xFF02 => return @bitCast(self.SC),
         0xFF03 => return 0xFF, // unmapped
         0xFF04 => return self.DIV,
         0xFF05 => return self.TIMA,
@@ -192,7 +199,7 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
 
         0xFF00 => self.JOYP = value,
         0xFF01 => self.SB = value,
-        0xFF02 => self.SC = value,
+        0xFF02 => self.SC = @bitCast(value),
         0xFF03 => {}, // unmapped
         0xFF04 => self.DIV = 0,
         0xFF05 => self.TIMA = value,
@@ -248,4 +255,19 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
 
 pub fn write_ff(self: *Mem, addr_nib: u8, value: u8) void {
     self.write(0xff00 + @as(u16, addr_nib), value);
+}
+
+var debug_output: [1024]u8 = undefined;
+var debug_idx: usize = 0;
+
+pub fn tick(self: *Mem, clocks: usize) void {
+    for (0..clocks) |_| {
+        if (self.SC.transfer_en) {
+            self.SC.transfer_en = false;
+            debug_output[debug_idx] = self.SB;
+            self.SB = 0xFF;
+            debug_idx += 1;
+            std.debug.print("SERIAL: '{s}'\n", .{debug_output});
+        }
+    }
 }
