@@ -31,10 +31,10 @@ pub fn main() !void {
     var file = try std.fs.cwd().openFile(args[1], .{});
     defer file.close();
 
-    var mem: Mem = Mem.init();
+    const rom = try file.readToEndAlloc(allocator, 1024 * 1024);
 
-    const rom = try file.readToEndAlloc(allocator, 1024 * 32);
-    std.mem.copy(u8, &mem.rom, rom);
+    var mem: Mem = Mem.init();
+    mem.load_rom(rom);
 
     std.debug.print("Read {d} bytes\n", .{rom.len});
 
@@ -88,9 +88,9 @@ pub fn main() !void {
         mem.joypad_state.select = r.IsKeyDown(r.KEY_LEFT_SHIFT);
         mem.joypad_state.a = r.IsKeyDown(r.KEY_Z);
         mem.joypad_state.b = r.IsKeyDown(r.KEY_X);
-        mem.joypad_state.up = r.IsKeyDown(r.KEY_K);
-        mem.joypad_state.down = r.IsKeyDown(r.KEY_J);
-        mem.joypad_state.left = r.IsKeyDown(r.KEY_H);
+        mem.joypad_state.up = r.IsKeyDown(r.KEY_I);
+        mem.joypad_state.down = r.IsKeyDown(r.KEY_K);
+        mem.joypad_state.left = r.IsKeyDown(r.KEY_J);
         mem.joypad_state.right = r.IsKeyDown(r.KEY_L);
 
         // if (cpu.halted) {

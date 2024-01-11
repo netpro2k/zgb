@@ -147,7 +147,11 @@ const Sprite = packed struct {
 
 const Mem = @This();
 
-rom: [0x7FFF + 1]u8,
+rom: []u8,
+bank_0: []u8,
+bank_n: []u8,
+bank: u5,
+
 work_ram: [0xDFFF - 0xC000 + 1]u8,
 high_ram: [0xFFFE - 0xFF80 + 1]u8,
 vram: [0x9FFF - 0x8000 + 1]u8,
@@ -184,6 +188,9 @@ var first_read = false;
 pub fn init() Mem {
     var mem = Mem{
         .rom = undefined,
+        .bank_0 = undefined,
+        .bank_n = undefined,
+        .bank = 1,
         .work_ram = undefined,
         .high_ram = undefined,
         .vram = undefined,
@@ -211,6 +218,20 @@ pub fn init() Mem {
     return mem;
 }
 
+pub fn load_rom(self: *Mem, rom: []u8) void {
+    self.rom = rom;
+    self.bank_0 = self.rom[0x0000..0x4000];
+    self.set_bank(0);
+}
+
+pub fn set_bank(self: *Mem, new_bank: u5) void {
+    self.bank = new_bank;
+    if (self.bank == 0) self.bank = 1;
+    const start: usize = 0x4000 * @as(usize, self.bank);
+    // std.debug.print("Setting bank to {d} {X:0>4}..{X:0>4}\n", .{ new_bank, start, start + 0x4000 });
+    self.bank_n = self.rom[start .. start + 0x4000];
+}
+
 pub fn read(self: *Mem, addr: u16) u8 {
     self.pending_cycles += 1;
     return self.read_silent(addr);
@@ -218,8 +239,11 @@ pub fn read(self: *Mem, addr: u16) u8 {
 
 pub fn read_silent(self: *Mem, addr: u16) u8 {
     switch (addr) {
-        0x0000...0x7FFF => { // ROM
-            return self.rom[addr];
+        0x0000...0x3FFF => { // Bank 0
+            return self.bank_0[addr];
+        },
+        0x4000...0x7FFF => { // Bank N
+            return self.bank_n[addr - 0x4000];
         },
         0x8000...0x9FFF => { // VRAM
             return self.vram[addr - 0x8000];
@@ -288,8 +312,8 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
     self.pending_cycles += 1;
 
     switch (addr) {
-        0x0000...0x7FFF => {
-            // self.rom[addr] = value;
+        0x2000...0x3FFF => {
+            self.set_bank(@truncate(value));
         },
         0xC000...0xDFFF => { // Work RAM
             self.work_ram[addr - 0xC000] = value;
