@@ -2,6 +2,8 @@ const std = @import("std");
 const CPU = @import("cpu.zig").CPU;
 const Interupt = @import("cpu.zig").Interupt;
 
+const r = @cImport(@cInclude("raylib.h"));
+
 pub const JoypadState = packed struct {
     right: bool,
     left: bool,
@@ -85,6 +87,7 @@ const LCD = struct {
     LY: u8,
     LYC: u8,
     cur_x: u16 = 0,
+    fb: []r.Color,
 };
 
 const Color = enum { white, light, dark, black };
@@ -310,14 +313,14 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         // If value $XY is written, the transfer will copy $XY00-$XY9F to $FE00-$FE9F.
         0xFF46 => {
             // TODO this needs to handle reading from anyway, also its not suposed to just happen instantly
-            // const start: u16 = (@as(u16, value) << 8);
+            const start: u16 = (@as(u16, value) << 8);
             // std.debug.print("Starting DMA {X}-{X}\n", .{ start, start + 0x9F });
-            // const prev_pending = self.pending_cycles;
-            // for (0..0x9F + 1) |i| {
-            //     const iu = @as(u16, @intCast(i));
-            //     self.write(0xFE00 + iu, self.read(start + iu));
-            // }
-            // self.pending_cycles = prev_pending;
+            const prev_pending = self.pending_cycles;
+            for (0..0x9F + 1) |i| {
+                const iu = @as(u16, @intCast(i));
+                self.write(0xFE00 + iu, self.read(start + iu));
+            }
+            self.pending_cycles = prev_pending;
         },
 
         0xFF47 => self.BGP = @bitCast(value),
@@ -374,6 +377,15 @@ fn step_timer(self: *Mem, cpu: *CPU) void {
     self.prev_result = result;
 }
 
+fn get_bit(n: anytype, b: anytype) u8 {
+    return ((n >> @intCast(b)) & 1);
+}
+
+const SCREEN_WIDTH: usize = 160;
+const SCREEN_HEIGHT: usize = 144;
+
+const cur_pallete: [4]r.Color = .{ r.WHITE, r.GRAY, r.DARKGRAY, r.BLACK };
+
 fn step_ppu(self: *Mem) void {
     const start_mode = self.lcd.STAT.mode;
     switch (self.lcd.STAT.mode) {
@@ -384,6 +396,31 @@ fn step_ppu(self: *Mem) void {
             }
         },
         .drawing => {
+            // TODO this is completely wrong, implement pixel FIFO
+            if (self.lcd.cur_x == 80) {
+                const out_y: usize = self.lcd.LY;
+                for (0..SCREEN_WIDTH) |out_x| {
+                    const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap) 0x09C00 else 0x9800;
+                    const map_x: usize = (out_x + self.lcd.SCX) % 256;
+                    const map_y: usize = (out_y + self.lcd.SCY) % 256;
+
+                    const t = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
+
+                    var offset: u16 = 0x8000 + (@as(u16, @intCast(t)) * 16);
+                    if (!self.lcd.LCDC.bg_win_tiles) {
+                        const rt: i8 = @as(i8, @bitCast(t));
+                        offset = @as(u16, @intCast(0x9000 + @as(i32, rt) * 16));
+                    }
+
+                    const tile_y = map_y % 8;
+                    const tile_x = map_x % 8;
+                    const high = self.read_silent(@intCast(offset + tile_y * 2));
+                    const low = self.read_silent(@intCast(offset + tile_y * 2 + 1));
+                    const c = get_bit(low, 7 - tile_x) | get_bit(high, 7 - tile_x) << 1;
+                    self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = cur_pallete[c];
+                }
+            }
+
             self.lcd.cur_x += 1;
             if (self.lcd.cur_x >= 172) {
                 self.lcd.STAT.mode = .hblank;
@@ -404,9 +441,9 @@ fn step_ppu(self: *Mem) void {
         .vblank => {
             self.lcd.cur_x += 1;
             if (self.lcd.cur_x >= 456) {
-                self.lcd.STAT.mode = .drawing;
+                self.lcd.cur_x = 0;
                 self.lcd.LY += 1;
-                if (self.lcd.LY > 153) {
+                if (self.lcd.LY >= 153) {
                     self.lcd.STAT.mode = .oam_scan;
                     self.lcd.LY = 0;
                     self.IF.vblank = true;

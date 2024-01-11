@@ -36,8 +36,6 @@ pub fn main() !void {
     const rom = try file.readToEndAlloc(allocator, 1024 * 32);
     std.mem.copy(u8, &mem.rom, rom);
 
-    mem.lcd.LY = 0x94; // TODO tetris waits on this, hardcode for now to get through to more interesting stuff
-
     std.debug.print("Read {d} bytes\n", .{rom.len});
 
     const stdin = std.io.getStdIn().reader();
@@ -54,6 +52,7 @@ pub fn main() !void {
     defer r.UnloadImage(fb_img);
     var fb_tex = r.LoadTextureFromImage(fb_img);
     defer r.UnloadTexture(fb_tex);
+    mem.lcd.fb = @as([*]r.Color, @ptrCast(fb_img.data.?))[0 .. SCREEN_WIDTH * SCREEN_HEIGHT];
 
     var tile_debug_img = r.GenImageColor(16 * 9, 24 * 9, r.BEIGE);
     defer r.UnloadImage(tile_debug_img);
@@ -146,6 +145,8 @@ pub fn main() !void {
             }
         }
         r.UpdateTexture(bg_debug_tex, bg_debug_img.data);
+
+        r.UpdateTexture(fb_tex, fb_img.data);
 
         r.BeginDrawing();
         r.ClearBackground(r.BEIGE);
