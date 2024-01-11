@@ -472,9 +472,10 @@ fn step_ppu(self: *Mem) void {
                     // LY + 16 must be greater than or equal to Sprite Y-Position
                     // LY + 16 must be less than Sprite Y-Position + Sprite Height (8 in Normal Mode, 16 in Tall-Sprite-Mode)
                     // The amount of sprites already stored in the OAM Buffer must be less than 10
+                    const sprite_height: u8 = if (self.lcd.LCDC.obj_size == .Large) 16 else 8;
                     if (sprite.x > 0 and
                         self.lcd.LY + 16 >= sprite.y and
-                        self.lcd.LY + 16 < sprite.y + 8)
+                        self.lcd.LY + 16 < sprite.y + sprite_height)
                     {
                         self.lcd.active_sprites[i] = sprite;
                         i += 1;
@@ -488,57 +489,59 @@ fn step_ppu(self: *Mem) void {
                 self.lcd.STAT.mode = .drawing;
             }
         },
+
+        // TODO this is completely wrong, implement pixel FIFO
         .drawing => {
-            // TODO this is completely wrong, implement pixel FIFO
-            const out_x: usize = self.lcd.cur_dots - 80;
-            const out_y: usize = self.lcd.LY;
+            const screen_x: usize = self.lcd.cur_dots - 80;
+            const screen_y: usize = self.lcd.LY;
 
             var bg_c: u2 = 0;
             if (self.lcd.LCDC.bg_en) {
                 const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap == 1) 0x09C00 else 0x9800;
-                const map_x: usize = (out_x + self.lcd.SCX) % 256;
-                const map_y: usize = (out_y + self.lcd.SCY) % 256;
+                const map_x: usize = (screen_x + self.lcd.SCX) % 256;
+                const map_y: usize = (screen_y + self.lcd.SCY) % 256;
 
                 const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
                 bg_c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
-                self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = self.BGP.get_rgba(bg_c);
+                self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = self.BGP.get_rgba(bg_c);
             }
 
             if (self.lcd.LCDC.obj_en) {
                 var lowest_x: u8 = 255;
                 for (self.lcd.active_sprites) |maybe_sprite| {
                     if (maybe_sprite) |sprite| {
-                        if (out_x + 8 >= sprite.x and out_x < sprite.x and sprite.x < lowest_x) {
+                        if (screen_x + 8 >= sprite.x and screen_x < sprite.x and sprite.x < lowest_x) {
                             if (sprite.flags.priority == 1 and bg_c != 0) break;
-                            var tile_x = 7 - (sprite.x - out_x - 1);
-                            var tile_y = 7 - (sprite.y - out_y - 8 - 1);
+
+                            const sprite_height: u8 = if (self.lcd.LCDC.obj_size == .Large) 16 else 8;
+                            var tile_x = 8 - (sprite.x - screen_x);
+                            var tile_y = 16 - (sprite.y - screen_y);
 
                             if (sprite.flags.x_flip) tile_x = 7 - tile_x;
-                            if (sprite.flags.y_flip) tile_y = 7 - tile_x;
+                            if (sprite.flags.y_flip) tile_y = sprite_height - 1 - tile_y;
 
                             lowest_x = sprite.x;
 
                             const pallete = if (sprite.flags.dmg_pallete == 0) self.OBP0 else self.OBP1;
                             const c = self.get_tile_color(TileAddressMode.unsigned, sprite.tile, tile_x, tile_y);
-                            if (c != 0) self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = pallete.get_rgba(c);
+                            if (c != 0) self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = pallete.get_rgba(c);
                         }
                     }
                 }
             }
 
-            if (self.lcd.LCDC.win_en and out_y >= self.lcd.WY and out_x + 8 > self.lcd.WX) {
+            if (self.lcd.LCDC.win_en and screen_y >= self.lcd.WY and screen_x + 8 > self.lcd.WX) {
                 const start_offset: u16 = if (self.lcd.LCDC.win_tilemap == 1) 0x09C00 else 0x9800;
-                const map_x: usize = out_x + 7 - self.lcd.WX;
-                const map_y: usize = out_y - self.lcd.WY;
+                const map_x: usize = screen_x + 7 - self.lcd.WX;
+                const map_y: usize = screen_y - self.lcd.WY;
 
                 const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
                 const c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
-                self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = self.BGP.get_rgba(c);
-                // self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = r.RED;
+                self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = self.BGP.get_rgba(c);
             }
 
             self.lcd.cur_dots += 1;
-            if (out_x == SCREEN_WIDTH - 1) {
+            if (screen_x == SCREEN_WIDTH - 1) {
                 self.lcd.STAT.mode = .hblank;
             }
 
