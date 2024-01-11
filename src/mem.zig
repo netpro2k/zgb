@@ -150,11 +150,12 @@ const Mem = @This();
 rom: []u8,
 bank_0: []u8,
 bank_n: []u8,
-bank: u5,
+bank: u7,
 
-work_ram: [0xDFFF - 0xC000 + 1]u8,
-high_ram: [0xFFFE - 0xFF80 + 1]u8,
-vram: [0x9FFF - 0x8000 + 1]u8,
+work_ram: [0x2000]u8,
+high_ram: [0x7F]u8,
+vram: [0x2000]u8,
+external_ram: [0x2000]u8,
 oam: [40]Sprite,
 
 todo_audio: [0xFF26 - 0xFF10 + 1]u8,
@@ -194,6 +195,7 @@ pub fn init() Mem {
         .work_ram = undefined,
         .high_ram = undefined,
         .vram = undefined,
+        .external_ram = undefined,
         .oam = undefined,
         .todo_audio = undefined,
         .IF = @bitCast(@as(u8, 0)),
@@ -224,7 +226,7 @@ pub fn load_rom(self: *Mem, rom: []u8) void {
     self.set_bank(0);
 }
 
-pub fn set_bank(self: *Mem, new_bank: u5) void {
+pub fn set_bank(self: *Mem, new_bank: u7) void {
     self.bank = new_bank;
     if (self.bank == 0) self.bank = 1;
     const start: usize = 0x4000 * @as(usize, self.bank);
@@ -248,7 +250,9 @@ pub fn read_silent(self: *Mem, addr: u16) u8 {
         0x8000...0x9FFF => { // VRAM
             return self.vram[addr - 0x8000];
         },
-
+        0xA000...0xBFFF => {
+            return self.external_ram[addr - 0xA000];
+        },
         0xC000...0xDFFF => { // Work RAM
             return self.work_ram[addr - 0xC000];
         },
@@ -321,6 +325,10 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         0x8000...0x9FFF => { // VRAM
             // std.debug.print("Write VRAM {X:0>4} = {X}", .{ addr, value });
             self.vram[addr - 0x8000] = value;
+        },
+
+        0xA000...0xBFFF => {
+            self.external_ram[addr - 0xA000] = value;
         },
 
         0xE000...0xFDFF => { // Echo Work RAM
@@ -538,10 +546,10 @@ fn step_ppu(self: *Mem) void {
         },
         .hblank => {
             self.lcd.cur_dots += 1;
-            if (self.lcd.cur_dots >= 456) {
+            if (self.lcd.cur_dots == 457) {
                 self.lcd.cur_dots = 0;
                 self.lcd.LY += 1;
-                if (self.lcd.LY > 143) {
+                if (self.lcd.LY == SCREEN_HEIGHT) {
                     self.lcd.STAT.mode = .vblank;
                 } else {
                     self.lcd.STAT.mode = .oam_scan;
@@ -551,10 +559,10 @@ fn step_ppu(self: *Mem) void {
         .vblank => {
             if (self.lcd.LY == SCREEN_HEIGHT) self.lcd.fb_dirty = true;
             self.lcd.cur_dots += 1;
-            if (self.lcd.cur_dots >= 456) {
+            if (self.lcd.cur_dots == 457) {
                 self.lcd.cur_dots = 0;
                 self.lcd.LY += 1;
-                if (self.lcd.LY >= 153) {
+                if (self.lcd.LY == 154) {
                     self.lcd.STAT.mode = .oam_scan;
                     self.lcd.LY = 0;
                     self.IF.vblank = true;
