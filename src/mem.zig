@@ -54,15 +54,32 @@ pub const LCDMode = enum(u2) {
     drawing,
 };
 
+const TileAddressMode = enum(u1) {
+    signed = 0,
+    unsigned,
+
+    pub fn get_addr(self: TileAddressMode, tile: u8) u16 {
+        if (self == .signed) {
+            const rt: i8 = @as(i8, @bitCast(tile));
+            return @intCast(0x9000 + @as(i32, rt) * 16);
+        } else {
+            return 0x8000 + (@as(u16, @intCast(tile)) * 16);
+        }
+    }
+};
+
 pub const LCDControl = packed struct {
     bg_en: bool,
     obj_en: bool,
-    bg_tilemap: bool,
-    bg_win_tiles: bool,
+    bg_tilemap: u1,
+    obj_size: enum(u1) {
+        Small = 0,
+        Large = 1,
+    },
+    bg_win_tiles: TileAddressMode,
     win_en: bool,
-    win_tilemap: bool,
+    win_tilemap: u1,
     lcd_en: bool,
-    _pad: u1 = 0,
 };
 
 pub const LCDStatus = packed struct {
@@ -86,8 +103,14 @@ const LCD = struct {
     WY: u8,
     LY: u8,
     LYC: u8,
-    cur_x: u16 = 0,
+
+    cur_dots: u16 = 0,
+    active_sprites: [10]?Sprite,
+
     fb: []r.Color,
+    fb_dirty: bool,
+
+    debug_last_bg_win_tiles: TileAddressMode,
 };
 
 const Color = enum { white, light, dark, black };
@@ -96,6 +119,14 @@ const Pallete = packed struct {
     c1: Color,
     c2: Color,
     c3: Color,
+
+    pub fn get_rgba(self: Pallete, color: u2) r.Color {
+        const colors: [4]r.Color = .{ r.GetColor(0xE8E8E8FF), r.GetColor(0xA0A0A0FF), r.GetColor(0x585858ff), r.GetColor(0x101010ff) };
+
+        return colors[
+            (@as(u8, @bitCast(self)) >> (@as(u3, color) * 2)) & 0b11
+        ];
+    }
 };
 
 const SpriteFlags = packed struct {
@@ -151,7 +182,7 @@ joypad_state: JoypadState,
 var first_read = false;
 
 pub fn init() Mem {
-    return Mem{
+    var mem = Mem{
         .rom = undefined,
         .work_ram = undefined,
         .high_ram = undefined,
@@ -169,12 +200,15 @@ pub fn init() Mem {
         .TMA = 0,
         .TAC = undefined,
         .prev_result = false,
-        .JOYP = @bitCast(@as(u8, 0xFF)),
+        .JOYP = @bitCast(@as(u8, 0x3F)),
         .lcd = undefined,
         .DIV = 0,
         .pending_cycles = 0,
         .joypad_state = @bitCast(@as(u8, 0x00)),
     };
+
+    mem.lcd.LCDC = @bitCast(@as(u8, 0x91));
+    return mem;
 }
 
 pub fn read(self: *Mem, addr: u16) u8 {
@@ -255,7 +289,7 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
 
     switch (addr) {
         0x0000...0x7FFF => {
-            self.rom[addr] = value;
+            // self.rom[addr] = value;
         },
         0xC000...0xDFFF => { // Work RAM
             self.work_ram[addr - 0xC000] = value;
@@ -299,7 +333,10 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         0xFF27...0xFF2F => {}, // unmapped
         0xFF30...0xFF3F => {}, // TODO wave pattern
 
-        0xFF40 => self.lcd.LCDC = @bitCast(value),
+        0xFF40 => {
+            self.lcd.LCDC = @bitCast(value);
+            std.debug.print("WRITE LCDC {x} {any}\n", .{ value, self.lcd.LCDC });
+        },
         0xFF41 => self.lcd.STAT = @bitCast(value),
         0xFF42 => self.lcd.SCY = value,
         0xFF43 => self.lcd.SCX = value,
@@ -355,8 +392,6 @@ fn step_timer(self: *Mem, cpu: *CPU) void {
     _ = cpu;
     self.DIV +%= 1;
 
-    if (!self.TAC.enable) return;
-
     const bit: u4 = switch (self.TAC.clock_select) {
         0b00 => 9,
         0b01 => 3,
@@ -377,59 +412,94 @@ fn step_timer(self: *Mem, cpu: *CPU) void {
     self.prev_result = result;
 }
 
-fn get_bit(n: anytype, b: anytype) u8 {
-    return ((n >> @intCast(b)) & 1);
+fn get_bit(n: anytype, b: anytype) u1 {
+    return @as(u1, @intCast((n >> @intCast(b)) & 1));
 }
 
 const SCREEN_WIDTH: usize = 160;
 const SCREEN_HEIGHT: usize = 144;
 
-const cur_pallete: [4]r.Color = .{ r.WHITE, r.GRAY, r.DARKGRAY, r.BLACK };
+pub fn get_tile_color(self: *Mem, addr_mode: TileAddressMode, tile: u8, tile_x: usize, tile_y: usize) u2 {
+    const offset = addr_mode.get_addr(tile);
+    const high = self.read_silent(@intCast(offset + tile_y * 2 + 1));
+    const low = self.read_silent(@intCast(offset + tile_y * 2));
+    return get_bit(low, 7 - tile_x) | @as(u2, get_bit(high, 7 - tile_x)) << 1;
+}
 
 fn step_ppu(self: *Mem) void {
+    // const cur_pallete: [4]r.Color = .{ r.GetColor(0xe0f8d0ff), r.GetColor(0x88c070ff), r.GetColor(0x346856ff), r.GetColor(0x081820ff) };
+
     const start_mode = self.lcd.STAT.mode;
     switch (self.lcd.STAT.mode) {
         .oam_scan => {
-            self.lcd.cur_x += 1;
-            if (self.lcd.cur_x >= 80) {
+            if (self.lcd.cur_dots == 0) {
+                for (0..10) |i| {
+                    self.lcd.active_sprites[i] = null;
+                }
+                var i: usize = 0;
+                for (self.oam) |sprite| {
+                    // Sprite X-Position must be greater than 0
+                    // LY + 16 must be greater than or equal to Sprite Y-Position
+                    // LY + 16 must be less than Sprite Y-Position + Sprite Height (8 in Normal Mode, 16 in Tall-Sprite-Mode)
+                    // The amount of sprites already stored in the OAM Buffer must be less than 10
+                    if (sprite.x > 0 and
+                        self.lcd.LY + 16 >= sprite.y and
+                        self.lcd.LY + 16 < sprite.y + 8)
+                    {
+                        self.lcd.active_sprites[i] = sprite;
+                        i += 1;
+                        if (i == 10) break;
+                    }
+                }
+            }
+
+            self.lcd.cur_dots += 1;
+            if (self.lcd.cur_dots >= 80) {
                 self.lcd.STAT.mode = .drawing;
             }
         },
         .drawing => {
             // TODO this is completely wrong, implement pixel FIFO
-            if (self.lcd.cur_x == 80) {
-                const out_y: usize = self.lcd.LY;
-                for (0..SCREEN_WIDTH) |out_x| {
-                    const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap) 0x09C00 else 0x9800;
-                    const map_x: usize = (out_x + self.lcd.SCX) % 256;
-                    const map_y: usize = (out_y + self.lcd.SCY) % 256;
+            const out_x: usize = self.lcd.cur_dots - 80;
+            const out_y: usize = self.lcd.LY;
+            const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap == 1) 0x09C00 else 0x9800;
+            const map_x: usize = (out_x + self.lcd.SCX) % 256;
+            const map_y: usize = (out_y + self.lcd.SCY) % 256;
 
-                    const t = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
+            const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
+            const c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
+            self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = self.BGP.get_rgba(c);
 
-                    var offset: u16 = 0x8000 + (@as(u16, @intCast(t)) * 16);
-                    if (!self.lcd.LCDC.bg_win_tiles) {
-                        const rt: i8 = @as(i8, @bitCast(t));
-                        offset = @as(u16, @intCast(0x9000 + @as(i32, rt) * 16));
+            var lowest_x: u8 = 255;
+            for (self.lcd.active_sprites) |maybe_sprite| {
+                if (maybe_sprite) |sprite| {
+                    if (out_x + 8 >= sprite.x and out_x < sprite.x and sprite.x < lowest_x) {
+                        var tile_x = 7 - (sprite.x - out_x - 1);
+                        var tile_y = 7 - (sprite.y - out_y - 8 - 1);
+
+                        if (sprite.flags.x_flip) tile_x = 7 - tile_x;
+                        if (sprite.flags.y_flip) tile_y = 7 - tile_x;
+
+                        lowest_x = sprite.x;
+
+                        const pallete = if (sprite.flags.dmg_pallete == 0) self.OBP0 else self.OBP1;
+                        const sc = self.get_tile_color(TileAddressMode.unsigned, sprite.tile, tile_x, tile_y);
+                        if (sc != 0) self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = pallete.get_rgba(sc);
                     }
-
-                    const tile_y = map_y % 8;
-                    const tile_x = map_x % 8;
-                    const high = self.read_silent(@intCast(offset + tile_y * 2));
-                    const low = self.read_silent(@intCast(offset + tile_y * 2 + 1));
-                    const c = get_bit(low, 7 - tile_x) | get_bit(high, 7 - tile_x) << 1;
-                    self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = cur_pallete[c];
                 }
             }
 
-            self.lcd.cur_x += 1;
-            if (self.lcd.cur_x >= 172) {
+            self.lcd.cur_dots += 1;
+            if (out_x == SCREEN_WIDTH - 1) {
                 self.lcd.STAT.mode = .hblank;
             }
+
+            self.lcd.debug_last_bg_win_tiles = self.lcd.LCDC.bg_win_tiles;
         },
         .hblank => {
-            self.lcd.cur_x += 1;
-            if (self.lcd.cur_x >= 456) {
-                self.lcd.cur_x = 0;
+            self.lcd.cur_dots += 1;
+            if (self.lcd.cur_dots >= 456) {
+                self.lcd.cur_dots = 0;
                 self.lcd.LY += 1;
                 if (self.lcd.LY > 143) {
                     self.lcd.STAT.mode = .vblank;
@@ -439,9 +509,10 @@ fn step_ppu(self: *Mem) void {
             }
         },
         .vblank => {
-            self.lcd.cur_x += 1;
-            if (self.lcd.cur_x >= 456) {
-                self.lcd.cur_x = 0;
+            if (self.lcd.LY == SCREEN_HEIGHT) self.lcd.fb_dirty = true;
+            self.lcd.cur_dots += 1;
+            if (self.lcd.cur_dots >= 456) {
+                self.lcd.cur_dots = 0;
                 self.lcd.LY += 1;
                 if (self.lcd.LY >= 153) {
                     self.lcd.STAT.mode = .oam_scan;
@@ -473,6 +544,7 @@ fn step(self: *Mem, cpu: *CPU) void {
         debug_idx = (debug_idx + 1) % 1024;
         // std.debug.print("SERIAL: '{s}'\n", .{debug_output});
     }
+
     self.step_timer(cpu);
     self.step_ppu();
 

@@ -88,10 +88,10 @@ pub fn main() !void {
         mem.joypad_state.select = r.IsKeyDown(r.KEY_LEFT_SHIFT);
         mem.joypad_state.a = r.IsKeyDown(r.KEY_Z);
         mem.joypad_state.b = r.IsKeyDown(r.KEY_X);
-        mem.joypad_state.up = r.IsKeyDown(r.KEY_UP);
-        mem.joypad_state.down = r.IsKeyDown(r.KEY_DOWN);
-        mem.joypad_state.left = r.IsKeyDown(r.KEY_LEFT);
-        mem.joypad_state.right = r.IsKeyDown(r.KEY_RIGHT);
+        mem.joypad_state.up = r.IsKeyDown(r.KEY_K);
+        mem.joypad_state.down = r.IsKeyDown(r.KEY_J);
+        mem.joypad_state.left = r.IsKeyDown(r.KEY_H);
+        mem.joypad_state.right = r.IsKeyDown(r.KEY_L);
 
         // if (cpu.halted) {
         //     step = true;
@@ -109,7 +109,7 @@ pub fn main() !void {
                 const high = mem.read_silent(@intCast(offset + line * 2));
                 const low = mem.read_silent(@intCast(offset + line * 2 + 1));
                 for (0..8) |px| {
-                    const c = bit(low, 7 - px) | bit(high, 7 - px) << 1;
+                    const c = bit(low, 7 - px) | @as(u2, bit(high, 7 - px)) << 1;
                     const x = ((t % 16) * 9 + px);
                     const y = ((t / 16) * 9 + line);
                     tile_debug_pixels[y * @as(usize, @intCast(tile_debug_img.width)) + x] = cur_pallete[c];
@@ -124,32 +124,38 @@ pub fn main() !void {
                 const start_offset: u16 = if (debug_map_sel) 0x09C00 else 0x9800;
                 const t = mem.read_silent(@intCast(start_offset + (ty * 32) + tx));
 
-                var offset: u16 = 0;
-                // if (mem.lcd.LCDC.bg_win_tiles) {
-                offset = 0x8000 + (@as(u16, @intCast(t)) * 16);
-                // } else {
-                //     const rt: i8 = @as(i8, @bitCast(t));
-                //     offset = @as(u16, @intCast(0x9000 + @as(i32, rt) * 16));
-                // }
-
                 for (0..8) |line| {
-                    const high = mem.read_silent(@intCast(offset + line * 2));
-                    const low = mem.read_silent(@intCast(offset + line * 2 + 1));
                     for (0..8) |px| {
-                        const c = bit(low, 7 - px) | bit(high, 7 - px) << 1;
+                        const c = mem.get_tile_color(mem.lcd.LCDC.bg_win_tiles, t, px, line);
                         const x = (tx * 8 + px);
                         const y = (ty * 8 + line);
-                        bg_debug_pixels[y * @as(usize, @intCast(bg_debug_img.width)) + x] = cur_pallete[c];
+                        bg_debug_pixels[y * @as(usize, @intCast(bg_debug_img.width)) + x] = mem.BGP.get_rgba(c);
                     }
                 }
             }
         }
         r.UpdateTexture(bg_debug_tex, bg_debug_img.data);
 
-        r.UpdateTexture(fb_tex, fb_img.data);
+        if (mem.lcd.fb_dirty) {
+            r.UpdateTexture(fb_tex, fb_img.data);
+            mem.lcd.fb_dirty = false;
+        }
 
         r.BeginDrawing();
         r.ClearBackground(r.BEIGE);
+
+        var buf = std.mem.zeroes([1024]u8);
+        var fbs = std.io.fixedBufferStream(&buf);
+        const writer = fbs.writer();
+
+        for (mem.oam) |sprite| {
+            try std.fmt.format(writer, "{d:0>3},{d:0>3} {X:0>2}\n", .{
+                sprite.x,
+                sprite.y,
+                sprite.tile,
+            });
+        }
+        r.DrawText(&buf, 550, 500, 12, r.BLACK);
 
         r.DrawText("Screen", 100, 37, 12, r.BLACK);
         r.DrawTextureEx(fb_tex, .{ .x = 101, .y = 51 }, 0, 2, r.WHITE);
@@ -167,12 +173,17 @@ pub fn main() !void {
         r.DrawRectangleLines(11 + SCX * 2, 401 + SCY * 2, SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2, r.LIGHTGRAY);
         r.DrawRectangleLines(10, 400, bg_debug_img.width * 2 + 2, bg_debug_img.height * 2 + 2, r.BLACK);
         //
+        //
+        for (0..4) |i| {
+            r.DrawRectangle(550 + 25 * @as(c_int, @intCast(i)), 470, 20, 20, mem.BGP.get_rgba(@intCast(i)));
+        }
+
         if (r.IsKeyPressed(r.KEY_D)) cpu.debug = !cpu.debug;
 
         r.EndDrawing();
     }
 }
 
-fn bit(n: anytype, b: anytype) u8 {
-    return ((n >> @intCast(b)) & 1);
+fn bit(n: anytype, b: anytype) u1 {
+    return @truncate((n >> @intCast(b)) & 1);
 }
