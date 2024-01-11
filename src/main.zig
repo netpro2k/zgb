@@ -80,7 +80,7 @@ pub fn main() !void {
 
         if (r.IsKeyPressed(r.KEY_S)) step = !step;
 
-        if (r.IsKeyPressedRepeat(r.KEY_M)) debug_map_sel = !debug_map_sel;
+        if (r.IsKeyPressed(r.KEY_M)) debug_map_sel = !debug_map_sel;
 
         if (!step or r.IsKeyPressed(r.KEY_N)) {}
 

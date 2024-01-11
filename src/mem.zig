@@ -71,11 +71,11 @@ const TileAddressMode = enum(u1) {
 pub const LCDControl = packed struct {
     bg_en: bool,
     obj_en: bool,
-    bg_tilemap: u1,
     obj_size: enum(u1) {
         Small = 0,
         Large = 1,
     },
+    bg_tilemap: u1,
     bg_win_tiles: TileAddressMode,
     win_en: bool,
     win_tilemap: u1,
@@ -451,8 +451,6 @@ pub fn get_tile_color(self: *Mem, addr_mode: TileAddressMode, tile: u8, tile_x: 
 }
 
 fn step_ppu(self: *Mem) void {
-    // const cur_pallete: [4]r.Color = .{ r.GetColor(0xe0f8d0ff), r.GetColor(0x88c070ff), r.GetColor(0x346856ff), r.GetColor(0x081820ff) };
-
     const start_mode = self.lcd.STAT.mode;
     switch (self.lcd.STAT.mode) {
         .oam_scan => {
@@ -486,31 +484,49 @@ fn step_ppu(self: *Mem) void {
             // TODO this is completely wrong, implement pixel FIFO
             const out_x: usize = self.lcd.cur_dots - 80;
             const out_y: usize = self.lcd.LY;
-            const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap == 1) 0x09C00 else 0x9800;
-            const map_x: usize = (out_x + self.lcd.SCX) % 256;
-            const map_y: usize = (out_y + self.lcd.SCY) % 256;
 
-            const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
-            const c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
-            self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = self.BGP.get_rgba(c);
+            var bg_c: u2 = 0;
+            if (self.lcd.LCDC.bg_en) {
+                const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap == 1) 0x09C00 else 0x9800;
+                const map_x: usize = (out_x + self.lcd.SCX) % 256;
+                const map_y: usize = (out_y + self.lcd.SCY) % 256;
 
-            var lowest_x: u8 = 255;
-            for (self.lcd.active_sprites) |maybe_sprite| {
-                if (maybe_sprite) |sprite| {
-                    if (out_x + 8 >= sprite.x and out_x < sprite.x and sprite.x < lowest_x) {
-                        var tile_x = 7 - (sprite.x - out_x - 1);
-                        var tile_y = 7 - (sprite.y - out_y - 8 - 1);
+                const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
+                bg_c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
+                self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = self.BGP.get_rgba(bg_c);
+            }
 
-                        if (sprite.flags.x_flip) tile_x = 7 - tile_x;
-                        if (sprite.flags.y_flip) tile_y = 7 - tile_x;
+            if (self.lcd.LCDC.obj_en) {
+                var lowest_x: u8 = 255;
+                for (self.lcd.active_sprites) |maybe_sprite| {
+                    if (maybe_sprite) |sprite| {
+                        if (out_x + 8 >= sprite.x and out_x < sprite.x and sprite.x < lowest_x) {
+                            if (sprite.flags.priority == 1 and bg_c != 0) break;
+                            var tile_x = 7 - (sprite.x - out_x - 1);
+                            var tile_y = 7 - (sprite.y - out_y - 8 - 1);
 
-                        lowest_x = sprite.x;
+                            if (sprite.flags.x_flip) tile_x = 7 - tile_x;
+                            if (sprite.flags.y_flip) tile_y = 7 - tile_x;
 
-                        const pallete = if (sprite.flags.dmg_pallete == 0) self.OBP0 else self.OBP1;
-                        const sc = self.get_tile_color(TileAddressMode.unsigned, sprite.tile, tile_x, tile_y);
-                        if (sc != 0) self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = pallete.get_rgba(sc);
+                            lowest_x = sprite.x;
+
+                            const pallete = if (sprite.flags.dmg_pallete == 0) self.OBP0 else self.OBP1;
+                            const c = self.get_tile_color(TileAddressMode.unsigned, sprite.tile, tile_x, tile_y);
+                            if (c != 0) self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = pallete.get_rgba(c);
+                        }
                     }
                 }
+            }
+
+            if (self.lcd.LCDC.win_en and out_y >= self.lcd.WY and out_x + 8 > self.lcd.WX) {
+                const start_offset: u16 = if (self.lcd.LCDC.win_tilemap == 1) 0x09C00 else 0x9800;
+                const map_x: usize = out_x + 7 - self.lcd.WX;
+                const map_y: usize = out_y - self.lcd.WY;
+
+                const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
+                const c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
+                self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = self.BGP.get_rgba(c);
+                // self.lcd.fb[out_y * SCREEN_WIDTH + out_x] = r.RED;
             }
 
             self.lcd.cur_dots += 1;
