@@ -101,6 +101,8 @@ const LCD = struct {
     SCX: u8,
     WX: u8,
     WY: u8,
+    WLY: u8,
+
     LY: u8,
     LYC: u8,
 
@@ -162,6 +164,7 @@ todo_audio: [0xFF26 - 0xFF10 + 1]u8,
 
 IF: Irq,
 IE: Irq,
+prev_IF: Irq,
 
 BGP: Pallete,
 OBP0: Pallete,
@@ -199,6 +202,7 @@ pub fn init() Mem {
         .oam = undefined,
         .todo_audio = undefined,
         .IF = @bitCast(@as(u8, 0)),
+        .prev_IF = @bitCast(@as(u8, 0)),
         .IE = undefined,
         .BGP = undefined,
         .OBP0 = undefined,
@@ -370,7 +374,7 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
 
         0xFF40 => {
             self.lcd.LCDC = @bitCast(value);
-            std.debug.print("WRITE LCDC {x} {any}\n", .{ value, self.lcd.LCDC });
+            // std.debug.print("WRITE LCDC {x} {any}\n", .{ value, self.lcd.LCDC });
         },
         0xFF41 => self.lcd.STAT = @bitCast((@as(u8, @bitCast(self.lcd.STAT)) & 0b11) | (value & 0b11111100)),
         0xFF42 => self.lcd.SCY = value,
@@ -502,10 +506,25 @@ fn step_ppu(self: *Mem) void {
                 const screen_y: usize = self.lcd.LY;
 
                 var bg_c: u2 = 0;
-                if (self.lcd.LCDC.bg_en) {
+                {
                     const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap == 1) 0x09C00 else 0x9800;
                     const map_x: usize = (screen_x + self.lcd.SCX) % 256;
                     const map_y: usize = (screen_y + self.lcd.SCY) % 256;
+
+                    const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
+                    bg_c = if (!self.lcd.LCDC.bg_en) 0 else self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
+                    self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = self.BGP.get_rgba(bg_c);
+                }
+
+                if (self.lcd.LCDC.win_en and screen_y >= self.lcd.WY and screen_x + 8 > self.lcd.WX) {
+                    const start_offset: u16 = if (self.lcd.LCDC.win_tilemap == 1) 0x09C00 else 0x9800;
+
+                    // TODO this is particularly ugly
+                    if (self.lcd.WLY == 0) self.lcd.WLY = self.lcd.LY - self.lcd.WY;
+                    if (self.lcd.cur_dots == 80 + SCREEN_WIDTH + 12) self.lcd.WLY += 1;
+
+                    const map_x: usize = screen_x + 7 - self.lcd.WX;
+                    const map_y: usize = self.lcd.WLY;
 
                     const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
                     bg_c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
@@ -528,22 +547,13 @@ fn step_ppu(self: *Mem) void {
 
                                 lowest_x = sprite.x;
 
+                                const tile: u8 = if (self.lcd.LCDC.obj_size == .Large) sprite.tile & ~@as(u8, 1) else sprite.tile;
                                 const pallete = if (sprite.flags.dmg_pallete == 0) self.OBP0 else self.OBP1;
-                                const c = self.get_tile_color(TileAddressMode.unsigned, sprite.tile, tile_x, tile_y);
+                                const c = self.get_tile_color(TileAddressMode.unsigned, tile, tile_x, tile_y);
                                 if (c != 0) self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = pallete.get_rgba(c);
                             }
                         }
                     }
-                }
-
-                if (self.lcd.LCDC.win_en and screen_y >= self.lcd.WY and screen_x + 8 > self.lcd.WX) {
-                    const start_offset: u16 = if (self.lcd.LCDC.win_tilemap == 1) 0x09C00 else 0x9800;
-                    const map_x: usize = screen_x + 7 - self.lcd.WX;
-                    const map_y: usize = screen_y - self.lcd.WY;
-
-                    const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
-                    const c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
-                    self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = self.BGP.get_rgba(c);
                 }
 
                 self.lcd.debug_last_bg_win_tiles = self.lcd.LCDC.bg_win_tiles;
@@ -559,8 +569,13 @@ fn step_ppu(self: *Mem) void {
             if (self.lcd.cur_dots == 457) {
                 self.lcd.cur_dots = 0;
                 self.lcd.LY += 1;
+
+                self.lcd.STAT.ly_coincidence = self.lcd.LY == self.lcd.LYC;
+                if (self.lcd.STAT.ly_coincidence) self.IF.lcd_stat = true;
+
                 if (self.lcd.LY == SCREEN_HEIGHT) {
                     self.lcd.STAT.mode = .vblank;
+                    self.IF.vblank = true;
                 } else {
                     self.lcd.STAT.mode = .oam_scan;
                 }
@@ -572,16 +587,18 @@ fn step_ppu(self: *Mem) void {
             if (self.lcd.cur_dots == 457) {
                 self.lcd.cur_dots = 0;
                 self.lcd.LY += 1;
+
+                self.lcd.STAT.ly_coincidence = self.lcd.LY == self.lcd.LYC;
+                if (self.lcd.STAT.ly_coincidence) self.IF.lcd_stat = true;
+
                 if (self.lcd.LY == 154) {
                     self.lcd.STAT.mode = .oam_scan;
                     self.lcd.LY = 0;
-                    self.IF.vblank = true;
+                    self.lcd.WLY = 0;
                 }
             }
         },
     }
-
-    self.lcd.STAT.ly_coincidence = self.lcd.LY == self.lcd.LYC;
 
     const mode_trigger = switch (self.lcd.STAT.mode) {
         .oam_scan => self.lcd.STAT.interupt_sel.oam_scan,
@@ -589,11 +606,7 @@ fn step_ppu(self: *Mem) void {
         .hblank => self.lcd.STAT.interupt_sel.hblank,
         .vblank => self.lcd.STAT.interupt_sel.vblank,
     } and self.lcd.STAT.mode != start_mode;
-    const lyc_trigger = self.lcd.STAT.interupt_sel.lyc and self.lcd.STAT.ly_coincidence;
-
-    if (mode_trigger or lyc_trigger) {
-        self.IF.lcd_stat = true;
-    }
+    if (mode_trigger) self.IF.lcd_stat = true;
 }
 
 fn step(self: *Mem, cpu: *CPU) void {

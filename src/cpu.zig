@@ -339,6 +339,7 @@ pub fn trigger_interupt(self: *CPU, mem: *Mem, interupt: Interupt) void {
         .joypad => 0x60,
     };
 
+    mem.pending_cycles += 2;
     // std.debug.print("Disable IME\n", .{});
     self.IME = false;
     self.halted = false;
@@ -371,24 +372,25 @@ pub fn tick(self: *CPU, mem: *Mem, dt: i64) void {
 
         if (self.halted and @as(u8, @bitCast(mem.IF)) != 0) self.halted = false;
 
+        if (self.IME) {
+            if (mem.IF.vblank and mem.IE.vblank and !mem.prev_IF.vblank) {
+                self.trigger_interupt(mem, .vblank);
+            } else if (mem.IF.lcd_stat and mem.IE.lcd_stat and !mem.prev_IF.lcd_stat) {
+                self.trigger_interupt(mem, .lcd_stat);
+            } else if (mem.IF.timer and mem.IE.timer and !mem.prev_IF.timer) {
+                self.trigger_interupt(mem, .timer);
+            } else if (mem.IF.serial and mem.IE.serial and !mem.prev_IF.serial) {
+                self.trigger_interupt(mem, .serial);
+            } else if (mem.IF.joypad and mem.IE.joypad and !mem.prev_IF.joypad) {
+                self.trigger_interupt(mem, .joypad);
+            }
+            mem.prev_IF = mem.IF;
+        }
+
         if (self.halted) {
             mem.pending_cycles += 1;
         } else {
             self.step(mem);
-        }
-
-        if (self.IME) {
-            if (mem.IF.vblank and mem.IE.vblank) {
-                self.trigger_interupt(mem, .vblank);
-            } else if (mem.IF.lcd_stat and mem.IE.lcd_stat) {
-                self.trigger_interupt(mem, .lcd_stat);
-            } else if (mem.IF.timer and mem.IE.timer) {
-                self.trigger_interupt(mem, .timer);
-            } else if (mem.IF.serial and mem.IE.serial) {
-                self.trigger_interupt(mem, .serial);
-            } else if (mem.IF.joypad and mem.IE.joypad) {
-                self.trigger_interupt(mem, .joypad);
-            }
         }
 
         if (cycles >= mem.pending_cycles * 4) {
