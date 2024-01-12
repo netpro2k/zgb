@@ -237,7 +237,7 @@ pub const Op = enum(u8) {
     sbc_a_ib = 0xDE,
     rst_18 = 0xDF,
 
-    ld_ib_a = 0xE0,
+    sta = 0xE0,
     pop_hl = 0xE1,
     ld_mc_a = 0xE2,
     // no E3
@@ -247,14 +247,14 @@ pub const Op = enum(u8) {
     rst_20 = 0xE7,
     add_sp_ib = 0xE8,
     jp_hl = 0xE9,
-    ld_iw_a = 0xEA,
+    ld_miw_a = 0xEA,
     // no EB
     // no EC
     // no ED
     xor_a_ib = 0xEE,
     rst_28 = 0xEF,
 
-    ldh_a = 0xF0,
+    lda = 0xF0,
     pop_af = 0xF1,
     ld_a_ffc = 0xf2,
     di = 0xF3,

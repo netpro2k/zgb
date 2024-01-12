@@ -350,7 +350,10 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         0xFF02 => self.SC = @bitCast(value),
         0xFF03 => {}, // unmapped
         0xFF04 => self.DIV = 0,
-        0xFF05 => self.TIMA = value,
+        0xFF05 => {
+            self.TIMA = value;
+            // std.debug.print("WRITE TIMA {x}\n", .{self.TIMA});
+        },
         0xFF06 => self.TMA = value,
         0xFF07 => {
             self.TAC = @bitCast(value);
@@ -369,7 +372,7 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
             self.lcd.LCDC = @bitCast(value);
             std.debug.print("WRITE LCDC {x} {any}\n", .{ value, self.lcd.LCDC });
         },
-        0xFF41 => self.lcd.STAT = @bitCast(value),
+        0xFF41 => self.lcd.STAT = @bitCast((@as(u8, @bitCast(self.lcd.STAT)) & 0b11) | (value & 0b11111100)),
         0xFF42 => self.lcd.SCY = value,
         0xFF43 => self.lcd.SCX = value,
 
@@ -421,7 +424,6 @@ var debug_output: [1024]u8 = undefined;
 var debug_idx: usize = 0;
 
 fn step_timer(self: *Mem, cpu: *CPU) void {
-    _ = cpu;
     self.DIV +%= 1;
 
     const bit: u4 = switch (self.TAC.clock_select) {
@@ -436,6 +438,7 @@ fn step_timer(self: *Mem, cpu: *CPU) void {
     // std.debug.print("DIV {b} bit {d} res: {any} TACe {any} \n", .{ self.DIV, bit, result, self.TAC.enable });
     if (self.prev_result and !result) { // falling edge
         self.TIMA +%= 1;
+        if (cpu.debug) std.debug.print("TIMA {X}\n", .{self.TIMA});
         if (self.TIMA == 0x00) {
             self.TIMA = self.TMA;
             self.IF.timer = true;
@@ -459,6 +462,8 @@ pub fn get_tile_color(self: *Mem, addr_mode: TileAddressMode, tile: u8, tile_x: 
 }
 
 fn step_ppu(self: *Mem) void {
+    if (!self.lcd.LCDC.lcd_en) return;
+
     const start_mode = self.lcd.STAT.mode;
     switch (self.lcd.STAT.mode) {
         .oam_scan => {
@@ -485,67 +490,69 @@ fn step_ppu(self: *Mem) void {
             }
 
             self.lcd.cur_dots += 1;
-            if (self.lcd.cur_dots >= 80) {
+            if (self.lcd.cur_dots == 81) {
                 self.lcd.STAT.mode = .drawing;
             }
         },
 
         // TODO this is completely wrong, implement pixel FIFO
         .drawing => {
-            const screen_x: usize = self.lcd.cur_dots - 80;
-            const screen_y: usize = self.lcd.LY;
+            if (self.lcd.cur_dots > 80 + 12) {
+                const screen_x: usize = self.lcd.cur_dots - (80 + 12 + 1);
+                const screen_y: usize = self.lcd.LY;
 
-            var bg_c: u2 = 0;
-            if (self.lcd.LCDC.bg_en) {
-                const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap == 1) 0x09C00 else 0x9800;
-                const map_x: usize = (screen_x + self.lcd.SCX) % 256;
-                const map_y: usize = (screen_y + self.lcd.SCY) % 256;
+                var bg_c: u2 = 0;
+                if (self.lcd.LCDC.bg_en) {
+                    const start_offset: u16 = if (self.lcd.LCDC.bg_tilemap == 1) 0x09C00 else 0x9800;
+                    const map_x: usize = (screen_x + self.lcd.SCX) % 256;
+                    const map_y: usize = (screen_y + self.lcd.SCY) % 256;
 
-                const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
-                bg_c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
-                self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = self.BGP.get_rgba(bg_c);
-            }
+                    const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
+                    bg_c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
+                    self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = self.BGP.get_rgba(bg_c);
+                }
 
-            if (self.lcd.LCDC.obj_en) {
-                var lowest_x: u8 = 255;
-                for (self.lcd.active_sprites) |maybe_sprite| {
-                    if (maybe_sprite) |sprite| {
-                        if (screen_x + 8 >= sprite.x and screen_x < sprite.x and sprite.x < lowest_x) {
-                            if (sprite.flags.priority == 1 and bg_c != 0) break;
+                if (self.lcd.LCDC.obj_en) {
+                    var lowest_x: u8 = 255;
+                    for (self.lcd.active_sprites) |maybe_sprite| {
+                        if (maybe_sprite) |sprite| {
+                            if (screen_x + 8 >= sprite.x and screen_x < sprite.x and sprite.x < lowest_x) {
+                                if (sprite.flags.priority == 1 and bg_c != 0) break;
 
-                            const sprite_height: u8 = if (self.lcd.LCDC.obj_size == .Large) 16 else 8;
-                            var tile_x = 8 - (sprite.x - screen_x);
-                            var tile_y = 16 - (sprite.y - screen_y);
+                                const sprite_height: u8 = if (self.lcd.LCDC.obj_size == .Large) 16 else 8;
+                                var tile_x = 8 - (sprite.x - screen_x);
+                                var tile_y = 16 - (sprite.y - screen_y);
 
-                            if (sprite.flags.x_flip) tile_x = 7 - tile_x;
-                            if (sprite.flags.y_flip) tile_y = sprite_height - 1 - tile_y;
+                                if (sprite.flags.x_flip) tile_x = 7 - tile_x;
+                                if (sprite.flags.y_flip) tile_y = sprite_height - 1 - tile_y;
 
-                            lowest_x = sprite.x;
+                                lowest_x = sprite.x;
 
-                            const pallete = if (sprite.flags.dmg_pallete == 0) self.OBP0 else self.OBP1;
-                            const c = self.get_tile_color(TileAddressMode.unsigned, sprite.tile, tile_x, tile_y);
-                            if (c != 0) self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = pallete.get_rgba(c);
+                                const pallete = if (sprite.flags.dmg_pallete == 0) self.OBP0 else self.OBP1;
+                                const c = self.get_tile_color(TileAddressMode.unsigned, sprite.tile, tile_x, tile_y);
+                                if (c != 0) self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = pallete.get_rgba(c);
+                            }
                         }
                     }
                 }
-            }
 
-            if (self.lcd.LCDC.win_en and screen_y >= self.lcd.WY and screen_x + 8 > self.lcd.WX) {
-                const start_offset: u16 = if (self.lcd.LCDC.win_tilemap == 1) 0x09C00 else 0x9800;
-                const map_x: usize = screen_x + 7 - self.lcd.WX;
-                const map_y: usize = screen_y - self.lcd.WY;
+                if (self.lcd.LCDC.win_en and screen_y >= self.lcd.WY and screen_x + 8 > self.lcd.WX) {
+                    const start_offset: u16 = if (self.lcd.LCDC.win_tilemap == 1) 0x09C00 else 0x9800;
+                    const map_x: usize = screen_x + 7 - self.lcd.WX;
+                    const map_y: usize = screen_y - self.lcd.WY;
 
-                const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
-                const c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
-                self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = self.BGP.get_rgba(c);
+                    const tile = self.read_silent(@intCast(start_offset + ((map_y / 8) * 32) + (map_x / 8)));
+                    const c = self.get_tile_color(self.lcd.LCDC.bg_win_tiles, tile, map_x % 8, map_y % 8);
+                    self.lcd.fb[screen_y * SCREEN_WIDTH + screen_x] = self.BGP.get_rgba(c);
+                }
+
+                self.lcd.debug_last_bg_win_tiles = self.lcd.LCDC.bg_win_tiles;
             }
 
             self.lcd.cur_dots += 1;
-            if (screen_x == SCREEN_WIDTH - 1) {
+            if (self.lcd.cur_dots == 80 + SCREEN_WIDTH + 12 + 1) {
                 self.lcd.STAT.mode = .hblank;
             }
-
-            self.lcd.debug_last_bg_win_tiles = self.lcd.LCDC.bg_win_tiles;
         },
         .hblank => {
             self.lcd.cur_dots += 1;
@@ -574,13 +581,15 @@ fn step_ppu(self: *Mem) void {
         },
     }
 
+    self.lcd.STAT.ly_coincidence = self.lcd.LY == self.lcd.LYC;
+
     const mode_trigger = switch (self.lcd.STAT.mode) {
         .oam_scan => self.lcd.STAT.interupt_sel.oam_scan,
         .drawing => false,
         .hblank => self.lcd.STAT.interupt_sel.hblank,
         .vblank => self.lcd.STAT.interupt_sel.vblank,
     } and self.lcd.STAT.mode != start_mode;
-    const lyc_trigger = self.lcd.STAT.interupt_sel.lyc and self.lcd.LY == self.lcd.LYC;
+    const lyc_trigger = self.lcd.STAT.interupt_sel.lyc and self.lcd.STAT.ly_coincidence;
 
     if (mode_trigger or lyc_trigger) {
         self.IF.lcd_stat = true;
