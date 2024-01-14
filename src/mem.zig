@@ -164,7 +164,6 @@ todo_audio: [0xFF26 - 0xFF10 + 1]u8,
 
 IF: Irq,
 IE: Irq,
-prev_IF: Irq,
 
 BGP: Pallete,
 OBP0: Pallete,
@@ -174,6 +173,7 @@ SB: u8,
 SC: SerialControl,
 
 TIMA: u8,
+tima_overflow: u8,
 TMA: u8,
 TAC: TimerControl,
 prev_result: bool,
@@ -202,7 +202,6 @@ pub fn init() Mem {
         .oam = undefined,
         .todo_audio = undefined,
         .IF = @bitCast(@as(u8, 0)),
-        .prev_IF = @bitCast(@as(u8, 0)),
         .IE = undefined,
         .BGP = undefined,
         .OBP0 = undefined,
@@ -210,6 +209,7 @@ pub fn init() Mem {
         .SB = undefined,
         .SC = undefined,
         .TIMA = 0,
+        .tima_overflow = 0,
         .TMA = 0,
         .TAC = undefined,
         .prev_result = false,
@@ -273,11 +273,11 @@ pub fn read_silent(self: *Mem, addr: u16) u8 {
         0xFF02 => return @bitCast(self.SC),
         0xFF03 => return 0xFF, // unmapped
         0xFF04 => return @truncate(self.DIV >> 8),
-        0xFF05 => return self.TIMA,
+        0xFF05 => return if (self.tima_overflow > 0) 0 else self.TIMA,
         0xFF06 => return self.TMA,
         0xFF07 => return @bitCast(self.TAC),
         0xFF08...0xFF0E => return 0xFF, // unmapped
-        0xFF0F => return @bitCast(self.IF),
+        0xFF0F => return @as(u8, @bitCast(self.IF)) | 0b11100000,
 
         0xFF10...0xFF26 => return self.todo_audio[addr - 0xFF10],
 
@@ -356,6 +356,7 @@ pub fn write(self: *Mem, addr: u16, value: u8) void {
         0xFF04 => self.DIV = 0,
         0xFF05 => {
             self.TIMA = value;
+            self.tima_overflow = 0;
             // std.debug.print("WRITE TIMA {x}\n", .{self.TIMA});
         },
         0xFF06 => self.TMA = value,
@@ -424,7 +425,7 @@ pub fn write_ff(self: *Mem, addr_nib: u8, value: u8) void {
     self.write(0xff00 + @as(u16, addr_nib), value);
 }
 
-var debug_output: [1024]u8 = undefined;
+var debug_output: [1024 * 5]u8 = undefined;
 var debug_idx: usize = 0;
 
 fn step_timer(self: *Mem, cpu: *CPU) void {
@@ -439,15 +440,20 @@ fn step_timer(self: *Mem, cpu: *CPU) void {
 
     const result = ((self.DIV >> bit) & 1) & @intFromBool(self.TAC.enable) != 0;
 
-    // std.debug.print("DIV {b} bit {d} res: {any} TACe {any} \n", .{ self.DIV, bit, result, self.TAC.enable });
-    if (self.prev_result and !result) { // falling edge
-        self.TIMA +%= 1;
-        if (cpu.debug) std.debug.print("TIMA {X}\n", .{self.TIMA});
-        if (self.TIMA == 0x00) {
+    if (self.tima_overflow > 0) {
+        self.tima_overflow -= 1;
+        if (self.tima_overflow == 0) {
             self.TIMA = self.TMA;
             self.IF.timer = true;
         }
+    } else if (self.prev_result and !result) { // falling edge
+        self.TIMA +%= 1;
+        if (cpu.debug) std.debug.print("TIMA {X}\n", .{self.TIMA});
+        if (self.TIMA == 0x00) {
+            self.tima_overflow = 4;
+        }
     }
+
     self.prev_result = result;
 }
 
@@ -614,7 +620,7 @@ fn step(self: *Mem, cpu: *CPU) void {
         self.SC.transfer_en = false;
         debug_output[debug_idx] = self.SB;
         self.SB = 0xFF;
-        debug_idx = (debug_idx + 1) % 1024;
+        debug_idx = (debug_idx + 1) % debug_output.len;
         // std.debug.print("SERIAL: '{s}'\n", .{debug_output});
     }
 

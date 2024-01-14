@@ -324,7 +324,6 @@ pub fn call(self: *CPU, mem: *Mem, addr: u16) void {
 
 pub fn rst(self: *CPU, mem: *Mem, addr: u16) void {
     self.call(mem, addr);
-    mem.pending_cycles += 1;
 }
 
 pub const Interupt = enum(u3) { vblank = 0, lcd_stat, timer, serial, joypad };
@@ -363,28 +362,27 @@ pub fn tick(self: *CPU, mem: *Mem, dt: i64) void {
         //     return;
         // }
 
+        if (self.halted and @as(u8, @bitCast(mem.IF)) != 0) self.halted = false;
+
+        if (self.IME) {
+            if (mem.IF.vblank and mem.IE.vblank) {
+                self.trigger_interupt(mem, .vblank);
+            } else if (mem.IF.lcd_stat and mem.IE.lcd_stat) {
+                self.trigger_interupt(mem, .lcd_stat);
+            } else if (mem.IF.timer and mem.IE.timer) {
+                self.trigger_interupt(mem, .timer);
+            } else if (mem.IF.serial and mem.IE.serial) {
+                self.trigger_interupt(mem, .serial);
+            } else if (mem.IF.joypad and mem.IE.joypad) {
+                self.trigger_interupt(mem, .joypad);
+            }
+        }
+
         if (self.enabling_ime) {
             // std.debug.print("Enable IME\n", .{});
 
             self.IME = true;
             self.enabling_ime = false;
-        }
-
-        if (self.halted and @as(u8, @bitCast(mem.IF)) != 0) self.halted = false;
-
-        if (self.IME) {
-            if (mem.IF.vblank and mem.IE.vblank and !mem.prev_IF.vblank) {
-                self.trigger_interupt(mem, .vblank);
-            } else if (mem.IF.lcd_stat and mem.IE.lcd_stat and !mem.prev_IF.lcd_stat) {
-                self.trigger_interupt(mem, .lcd_stat);
-            } else if (mem.IF.timer and mem.IE.timer and !mem.prev_IF.timer) {
-                self.trigger_interupt(mem, .timer);
-            } else if (mem.IF.serial and mem.IE.serial and !mem.prev_IF.serial) {
-                self.trigger_interupt(mem, .serial);
-            } else if (mem.IF.joypad and mem.IE.joypad and !mem.prev_IF.joypad) {
-                self.trigger_interupt(mem, .joypad);
-            }
-            mem.prev_IF = mem.IF;
         }
 
         if (self.halted) {
@@ -421,6 +419,7 @@ pub fn step(self: *CPU, mem: *Mem) void {
 
         .jp_iw => {
             self.PC = self.read_iw(mem);
+            mem.pending_cycles += 1;
         },
         .jp_hl => {
             self.PC = self.HL.r16;
@@ -489,10 +488,14 @@ pub fn step(self: *CPU, mem: *Mem) void {
         .jr_ib => {
             const ib = self.read_ib(mem);
             self.PC = signed_add(self.PC, ib);
+            mem.pending_cycles += 1;
         },
 
         .ld_sp_iw => self.SP = self.read_iw(mem),
-        .ld_sp_hl => self.SP = self.HL.r16,
+        .ld_sp_hl => {
+            self.SP = self.HL.r16;
+            mem.pending_cycles += 1;
+        },
 
         .ld_bc_iw => self.BC.r16 = self.read_iw(mem),
         .ld_bc_a => mem.write(self.BC.r16, self.AF.r8.A),
@@ -568,12 +571,27 @@ pub fn step(self: *CPU, mem: *Mem) void {
         .add_a_hl => self.AF.r8.A = self.alu_add(self.AF.r8.A, mem.read(self.HL.r16)),
         .add_a_ib => self.AF.r8.A = self.alu_add(self.AF.r8.A, self.read_ib(mem)),
 
-        .add_hl_bc => self.HL.r16 = self.alu_add_w(self.HL.r16, self.BC.r16),
-        .add_hl_de => self.HL.r16 = self.alu_add_w(self.HL.r16, self.DE.r16),
-        .add_hl_hl => self.HL.r16 = self.alu_add_w(self.HL.r16, self.HL.r16),
-        .add_hl_sp => self.HL.r16 = self.alu_add_w(self.HL.r16, self.SP),
+        .add_hl_bc => {
+            self.HL.r16 = self.alu_add_w(self.HL.r16, self.BC.r16);
+            mem.pending_cycles += 1;
+        },
+        .add_hl_de => {
+            self.HL.r16 = self.alu_add_w(self.HL.r16, self.DE.r16);
+            mem.pending_cycles += 1;
+        },
+        .add_hl_hl => {
+            self.HL.r16 = self.alu_add_w(self.HL.r16, self.HL.r16);
+            mem.pending_cycles += 1;
+        },
+        .add_hl_sp => {
+            self.HL.r16 = self.alu_add_w(self.HL.r16, self.SP);
+            mem.pending_cycles += 1;
+        },
 
-        .add_sp_ib => self.SP = self.alu_add_w_i(self.SP, self.read_ib(mem)),
+        .add_sp_ib => {
+            self.SP = self.alu_add_w_i(self.SP, self.read_ib(mem));
+            mem.pending_cycles += 2;
+        },
 
         .adc_a_a => self.AF.r8.A = self.alu_adc(self.AF.r8.A, self.AF.r8.A),
         .adc_a_b => self.AF.r8.A = self.alu_adc(self.AF.r8.A, self.BC.r8.B),
@@ -618,7 +636,10 @@ pub fn step(self: *CPU, mem: *Mem) void {
         .ld_hl_l => mem.write(self.HL.r16, self.HL.r8.L),
         .ld_hl_ib => mem.write(self.HL.r16, self.read_ib(mem)),
 
-        .ld_hl_sp_ib => self.HL.r16 = self.alu_add_w_i(self.SP, self.read_ib(mem)),
+        .ld_hl_sp_ib => {
+            self.HL.r16 = self.alu_add_w_i(self.SP, self.read_ib(mem));
+            mem.pending_cycles += 1;
+        },
 
         .ldd_hl_a => {
             mem.write(self.HL.r16, self.AF.r8.A);
@@ -766,10 +787,22 @@ pub fn step(self: *CPU, mem: *Mem) void {
             self.AF.flags.N = false;
         },
 
-        .pop_bc => self.BC.r16 = self.pop_w(mem),
-        .pop_de => self.DE.r16 = self.pop_w(mem),
-        .pop_hl => self.HL.r16 = self.pop_w(mem),
-        .pop_af => self.AF.r16 = self.pop_w(mem) & 0xFFF0,
+        .pop_bc => {
+            self.BC.r16 = self.pop_w(mem);
+            mem.pending_cycles -= 1;
+        },
+        .pop_de => {
+            self.DE.r16 = self.pop_w(mem);
+            mem.pending_cycles -= 1;
+        },
+        .pop_hl => {
+            self.HL.r16 = self.pop_w(mem);
+            mem.pending_cycles -= 1;
+        },
+        .pop_af => {
+            self.AF.r16 = self.pop_w(mem) & 0xFFF0;
+            mem.pending_cycles -= 1;
+        },
 
         .ld_iw_sp => {
             const addr = self.read_iw(mem);
@@ -810,28 +843,23 @@ pub fn step(self: *CPU, mem: *Mem) void {
 
         .call_z_iw => {
             const addr = self.read_iw(mem);
-            mem.pending_cycles += 1;
             if (self.AF.flags.Z) self.call(mem, addr);
         },
         .call_nz_iw => {
             const addr = self.read_iw(mem);
-            mem.pending_cycles += 1;
             if (!self.AF.flags.Z) self.call(mem, addr);
         },
         .call_c_iw => {
             const addr = self.read_iw(mem);
-            mem.pending_cycles += 1;
             if (self.AF.flags.C == 1) self.call(mem, addr);
         },
         .call_nc_iw => {
             const addr = self.read_iw(mem);
-            mem.pending_cycles += 1;
             if (self.AF.flags.C == 0) self.call(mem, addr);
         },
 
         .call_iw => {
             const addr = self.read_iw(mem);
-            mem.pending_cycles += 1;
             self.call(mem, addr);
         },
 
@@ -851,22 +879,26 @@ pub fn step(self: *CPU, mem: *Mem) void {
         },
 
         .ret_nz => {
+            mem.pending_cycles += 1;
             if (!self.AF.flags.Z) {
                 self.PC = self.pop_w(mem);
             }
         },
         .ret_z => {
+            mem.pending_cycles += 1;
             if (self.AF.flags.Z) {
                 self.PC = self.pop_w(mem);
             }
         },
 
         .ret_c => {
+            mem.pending_cycles += 1;
             if (self.AF.flags.C == 1) {
                 self.PC = self.pop_w(mem);
             }
         },
         .ret_nc => {
+            mem.pending_cycles += 1;
             if (self.AF.flags.C == 0) {
                 self.PC = self.pop_w(mem);
             }
